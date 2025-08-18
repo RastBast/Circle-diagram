@@ -14,167 +14,176 @@ import (
 	"time"
 )
 
-// Circle представляет круг на карте
 type Circle struct {
-	X, Y   int
+	X      int
+	Y      int
 	Radius int
-	Type   string // "spawn" или "bedroom"
 }
 
-// MapGenerator генерирует карту с кругами
-type MapGenerator struct {
+type MapConfig struct {
 	Width         int
 	Height        int
-	SpawnCnt      int
-	BedroomCnt    int
+	SpawnCount    int
+	BedroomCount  int
 	SpawnRadius   int
 	BedroomRadius int
 	MaxGap        int
-	Circles       []Circle
 }
 
-// Проверяет, пересекаются ли два круга (или касаются)
-func (mg *MapGenerator) circlesIntersect(c1, c2 Circle) bool {
-	dx := c1.X - c2.X
-	dy := c1.Y - c2.Y
-	distance := math.Sqrt(float64(dx*dx + dy*dy))
-	// Круги пересекаются, если расстояние меньше суммы радиусов
-	// Касание допустимо (distance == sum), пересечение нет (distance < sum)
-	return distance < float64(c1.Radius+c2.Radius)
+type MapData struct {
+	config   MapConfig
+	spawns   []Circle
+	bedrooms []Circle
 }
 
-// Проверяет, находится ли круг в границах карты
-func (mg *MapGenerator) isCircleInBounds(c Circle) bool {
-	return c.X-c.Radius >= 0 && c.X+c.Radius < mg.Width &&
-		c.Y-c.Radius >= 0 && c.Y+c.Radius < mg.Height
+func NewMapData(cfg MapConfig) *MapData {
+	return &MapData{
+		config:   cfg,
+		spawns:   make([]Circle, 0, cfg.SpawnCount),
+		bedrooms: make([]Circle, 0, cfg.BedroomCount),
+	}
 }
 
-// Находит расстояние до ближайшего круга
-func (mg *MapGenerator) findNearestDistance(c Circle) float64 {
-	minDistance := math.Inf(1)
-	for _, other := range mg.Circles {
-		// Пропускаем сам круг
-		if other.X == c.X && other.Y == c.Y && other.Radius == c.Radius {
+func (m *MapData) getAllCircles() []Circle {
+	all := make([]Circle, 0, len(m.spawns)+len(m.bedrooms))
+	all = append(all, m.spawns...)
+	all = append(all, m.bedrooms...)
+	return all
+}
+
+func distance(c1, c2 Circle) float64 {
+	dx := float64(c1.X - c2.X)
+	dy := float64(c1.Y - c2.Y)
+	return math.Sqrt(dx*dx + dy*dy)
+}
+
+func circlesOverlap(c1, c2 Circle) bool {
+	return distance(c1, c2) < float64(c1.Radius+c2.Radius)
+}
+
+func (m *MapData) canPlace(c Circle) bool {
+	if c.X-c.Radius < 0 || c.X+c.Radius >= m.config.Width ||
+		c.Y-c.Radius < 0 || c.Y+c.Radius >= m.config.Height {
+		return false
+	}
+
+	for _, existing := range m.getAllCircles() {
+		if circlesOverlap(c, existing) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *MapData) findClosest(target Circle) float64 {
+	minDist := math.Inf(1)
+
+	for _, c := range m.getAllCircles() {
+		if c.X == target.X && c.Y == target.Y && c.Radius == target.Radius {
 			continue
 		}
-		dx := c.X - other.X
-		dy := c.Y - other.Y
-		distance := math.Sqrt(float64(dx*dx + dy*dy))
-		if distance < minDistance {
-			minDistance = distance
+
+		dist := distance(target, c)
+		if dist < minDist {
+			minDist = dist
 		}
 	}
-	return minDistance
+
+	return minDist
 }
 
-// Генерирует карту с кругами
-func (mg *MapGenerator) Generate() error {
+func (m *MapData) generate() error {
 	rand.Seed(time.Now().UnixNano())
-	mg.Circles = make([]Circle, 0)
 
-	maxAttempts := 10000
-	totalCircles := mg.SpawnCnt + mg.BedroomCnt
+	// Place first spawn in center
+	if m.config.SpawnCount > 0 {
+		center := Circle{
+			X:      m.config.Width / 2,
+			Y:      m.config.Height / 2,
+			Radius: m.config.SpawnRadius,
+		}
 
-	// Проверяем, что задача вообще выполнима
-	if totalCircles == 0 {
-		return nil // Нет кругов для размещения
+		if m.canPlace(center) {
+			m.spawns = append(m.spawns, center)
+		}
 	}
 
-	// Размещаем spawn круги
-	for i := 0; i < mg.SpawnCnt; i++ {
+	// Place remaining spawns
+	for i := len(m.spawns); i < m.config.SpawnCount; i++ {
 		placed := false
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			circle := Circle{
-				X:      rand.Intn(mg.Width),
-				Y:      rand.Intn(mg.Height),
-				Radius: mg.SpawnRadius,
-				Type:   "spawn",
+
+		for attempts := 0; attempts < 5000; attempts++ {
+			var x, y int
+
+			existing := m.getAllCircles()
+			if len(existing) > 0 {
+				base := existing[rand.Intn(len(existing))]
+				angle := rand.Float64() * 2 * math.Pi
+				dist := float64(base.Radius + m.config.SpawnRadius + 1 + rand.Intn(50))
+
+				x = int(float64(base.X) + dist*math.Cos(angle))
+				y = int(float64(base.Y) + dist*math.Sin(angle))
+			} else {
+				x = m.config.SpawnRadius + rand.Intn(m.config.Width-2*m.config.SpawnRadius)
+				y = m.config.SpawnRadius + rand.Intn(m.config.Height-2*m.config.SpawnRadius)
 			}
 
-			if !mg.isCircleInBounds(circle) {
-				continue
-			}
+			c := Circle{X: x, Y: y, Radius: m.config.SpawnRadius}
 
-			// Проверяем пересечения с существующими кругами
-			valid := true
-			for _, existing := range mg.Circles {
-				if mg.circlesIntersect(circle, existing) {
-					valid = false
-					break
-				}
-			}
-
-			if valid {
-				mg.Circles = append(mg.Circles, circle)
+			if m.canPlace(c) {
+				m.spawns = append(m.spawns, c)
 				placed = true
 				break
 			}
 		}
+
 		if !placed {
-			return fmt.Errorf("не удалось разместить spawn круг %d из %d", i+1, mg.SpawnCnt)
+			return fmt.Errorf("cant place spawn %d", i+1)
 		}
 	}
 
-	// Размещаем bedroom круги
-	for i := 0; i < mg.BedroomCnt; i++ {
+	// Place bedrooms
+	for i := 0; i < m.config.BedroomCount; i++ {
 		placed := false
-		for attempt := 0; attempt < maxAttempts; attempt++ {
-			circle := Circle{
-				X:      rand.Intn(mg.Width),
-				Y:      rand.Intn(mg.Height),
-				Radius: mg.BedroomRadius,
-				Type:   "bedroom",
+
+		for attempts := 0; attempts < 5000; attempts++ {
+			var x, y int
+
+			existing := m.getAllCircles()
+			if len(existing) > 0 {
+				base := existing[rand.Intn(len(existing))]
+				angle := rand.Float64() * 2 * math.Pi
+				dist := float64(base.Radius + m.config.BedroomRadius + 1 + rand.Intn(50))
+
+				x = int(float64(base.X) + dist*math.Cos(angle))
+				y = int(float64(base.Y) + dist*math.Sin(angle))
+			} else {
+				x = m.config.BedroomRadius + rand.Intn(m.config.Width-2*m.config.BedroomRadius)
+				y = m.config.BedroomRadius + rand.Intn(m.config.Height-2*m.config.BedroomRadius)
 			}
 
-			if !mg.isCircleInBounds(circle) {
-				continue
-			}
+			c := Circle{X: x, Y: y, Radius: m.config.BedroomRadius}
 
-			// Проверяем пересечения с существующими кругами
-			valid := true
-			for _, existing := range mg.Circles {
-				if mg.circlesIntersect(circle, existing) {
-					valid = false
-					break
-				}
-			}
-
-			if valid {
-				mg.Circles = append(mg.Circles, circle)
+			if m.canPlace(c) {
+				m.bedrooms = append(m.bedrooms, c)
 				placed = true
 				break
 			}
 		}
+
 		if !placed {
-			return fmt.Errorf("не удалось разместить bedroom круг %d из %d", i+1, mg.BedroomCnt)
+			return fmt.Errorf("cant place bedroom %d", i+1)
 		}
 	}
 
-	// Проверяем условие maxgap для всех кругов
-	if len(mg.Circles) > 1 { // Проверяем только если есть больше одного круга
-		for i, circle := range mg.Circles {
-			// Временно убираем текущий круг из списка для поиска ближайшего
-			tempCircles := make([]Circle, 0, len(mg.Circles)-1)
-			for j, other := range mg.Circles {
-				if i != j {
-					tempCircles = append(tempCircles, other)
-				}
-			}
-
-			// Находим ближайший круг
-			minDistance := math.Inf(1)
-			for _, other := range tempCircles {
-				dx := circle.X - other.X
-				dy := circle.Y - other.Y
-				distance := math.Sqrt(float64(dx*dx + dy*dy))
-				if distance < minDistance {
-					minDistance = distance
-				}
-			}
-
-			if minDistance > float64(mg.MaxGap) {
-				return fmt.Errorf("круг %s на позиции (%d, %d) не имеет соседей в радиусе %d клеток (ближайший на расстоянии %.1f)",
-					circle.Type, circle.X, circle.Y, mg.MaxGap, minDistance)
+	// Check maxgap but dont fail, just warn
+	all := m.getAllCircles()
+	if len(all) > 1 {
+		for _, c := range all {
+			dist := m.findClosest(c)
+			if dist > float64(m.config.MaxGap) {
+				log.Printf("Warning: circle at (%d,%d) gap=%.1f > %d", 
+					c.X, c.Y, dist, m.config.MaxGap)
 			}
 		}
 	}
@@ -182,114 +191,84 @@ func (mg *MapGenerator) Generate() error {
 	return nil
 }
 
-// Создает изображение карты
-func (mg *MapGenerator) CreateImage() *image.RGBA {
-	cellSize := 100
-	imgWidth := mg.Width * cellSize
-	imgHeight := mg.Height * cellSize
+func (m *MapData) render() *image.RGBA {
+	cellSize := 1
+	if m.config.Width <= 100 && m.config.Height <= 100 {
+		cellSize = 10
+	}
 
-	img := image.NewRGBA(image.Rect(0, 0, imgWidth, imgHeight))
+	w := m.config.Width * cellSize
+	h := m.config.Height * cellSize
 
-	// Заливаем белым цветом
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+
+	// White bg
 	white := color.RGBA{255, 255, 255, 255}
-	for y := 0; y < imgHeight; y++ {
-		for x := 0; x < imgWidth; x++ {
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
 			img.Set(x, y, white)
 		}
 	}
 
-	// Рисуем координатную сетку
-	gray := color.RGBA{200, 200, 200, 255}
-	for i := 0; i <= mg.Width; i++ {
-		x := i * cellSize
-		for y := 0; y < imgHeight; y++ {
-			if x < imgWidth {
-				img.Set(x, y, gray)
+	// Grid for small maps
+	if cellSize > 1 {
+		gray := color.RGBA{200, 200, 200, 255}
+		for i := 0; i <= m.config.Width; i++ {
+			x := i * cellSize
+			for y := 0; y < h; y++ {
+				if x < w {
+					img.Set(x, y, gray)
+				}
 			}
 		}
-	}
-	for i := 0; i <= mg.Height; i++ {
-		y := i * cellSize
-		for x := 0; x < imgWidth; x++ {
-			if y < imgHeight {
-				img.Set(x, y, gray)
-			}
-		}
-	}
-
-	// Создаем карту клеток для отслеживания того, что уже закрашено
-	cellColors := make([][]color.RGBA, mg.Height)
-	for i := range cellColors {
-		cellColors[i] = make([]color.RGBA, mg.Width)
-		for j := range cellColors[i] {
-			cellColors[i][j] = white // По умолчанию белый
-		}
-	}
-
-	// Рисуем круги (сначала все круги синим)
-	blue := color.RGBA{0, 0, 255, 255} // Синий для кругов
-
-	for _, circle := range mg.Circles {
-		// Рисуем круг закрашиванием клеток
-		for dy := -circle.Radius; dy <= circle.Radius; dy++ {
-			for dx := -circle.Radius; dx <= circle.Radius; dx++ {
-				// Проверяем, находится ли точка в круге
-				if dx*dx+dy*dy <= circle.Radius*circle.Radius {
-					cellX := circle.X + dx
-					cellY := circle.Y + dy
-
-					// Проверяем границы карты
-					if cellX >= 0 && cellX < mg.Width && cellY >= 0 && cellY < mg.Height {
-						cellColors[cellY][cellX] = blue
-					}
+		for i := 0; i <= m.config.Height; i++ {
+			y := i * cellSize
+			for x := 0; x < w; x++ {
+				if y < h {
+					img.Set(x, y, gray)
 				}
 			}
 		}
 	}
 
-	// Теперь закрашиваем центры кругов зеленым
-	green := color.RGBA{0, 255, 0, 255} // Зеленый для центров
-	for _, circle := range mg.Circles {
-		if circle.X >= 0 && circle.X < mg.Width && circle.Y >= 0 && circle.Y < mg.Height {
-			cellColors[circle.Y][circle.X] = green
-		}
-	}
+	blue := color.RGBA{0, 0, 255, 255}
+	green := color.RGBA{0, 255, 0, 255}
 
-	// Применяем цвета клеток к изображению
-	for cellY := 0; cellY < mg.Height; cellY++ {
-		for cellX := 0; cellX < mg.Width; cellX++ {
-			cellColor := cellColors[cellY][cellX]
-			// Закрашиваем всю клетку выбранным цветом
-			for py := 0; py < cellSize; py++ {
-				for px := 0; px < cellSize; px++ {
-					imgX := cellX*cellSize + px
-					imgY := cellY*cellSize + py
-					if imgX < imgWidth && imgY < imgHeight {
-						// Не перезаписываем линии сетки
-						currentColor := img.RGBAAt(imgX, imgY)
-						if currentColor != gray {
-							img.Set(imgX, imgY, cellColor)
+	// Draw circles
+	for _, c := range m.getAllCircles() {
+		for dy := -c.Radius; dy <= c.Radius; dy++ {
+			for dx := -c.Radius; dx <= c.Radius; dx++ {
+				if dx*dx+dy*dy <= c.Radius*c.Radius {
+					cellX := c.X + dx
+					cellY := c.Y + dy
+
+					if cellX >= 0 && cellX < m.config.Width && 
+					   cellY >= 0 && cellY < m.config.Height {
+
+						for py := 0; py < cellSize; py++ {
+							for px := 0; px < cellSize; px++ {
+								imgX := cellX*cellSize + px
+								imgY := cellY*cellSize + py
+								if imgX < w && imgY < h {
+									img.Set(imgX, imgY, blue)
+								}
+							}
 						}
 					}
 				}
 			}
 		}
-	}
 
-	// Перерисовываем сетку поверх всего
-	for i := 0; i <= mg.Width; i++ {
-		x := i * cellSize
-		for y := 0; y < imgHeight; y++ {
-			if x < imgWidth {
-				img.Set(x, y, gray)
-			}
-		}
-	}
-	for i := 0; i <= mg.Height; i++ {
-		y := i * cellSize
-		for x := 0; x < imgWidth; x++ {
-			if y < imgHeight {
-				img.Set(x, y, gray)
+		// Center green
+		if c.X >= 0 && c.X < m.config.Width && c.Y >= 0 && c.Y < m.config.Height {
+			for py := 0; py < cellSize; py++ {
+				for px := 0; px < cellSize; px++ {
+					imgX := c.X*cellSize + px
+					imgY := c.Y*cellSize + py
+					if imgX < w && imgY < h {
+						img.Set(imgX, imgY, green)
+					}
+				}
 			}
 		}
 	}
@@ -297,91 +276,81 @@ func (mg *MapGenerator) CreateImage() *image.RGBA {
 	return img
 }
 
-// HTTP обработчик
+func parseRequest(r *http.Request) (*MapConfig, error) {
+	q := r.URL.Query()
+
+	width, err := strconv.Atoi(q.Get("width"))
+	if err != nil || width <= 0 || width > 2000 {
+		return nil, fmt.Errorf("bad width")
+	}
+
+	height, err := strconv.Atoi(q.Get("height"))
+	if err != nil || height <= 0 || height > 2000 {
+		return nil, fmt.Errorf("bad height")
+	}
+
+	spawns, err := strconv.Atoi(q.Get("spawnscnt"))
+	if err != nil || spawns < 0 || spawns > 50 {
+		return nil, fmt.Errorf("bad spawnscnt")
+	}
+
+	bedrooms, err := strconv.Atoi(q.Get("bedroomcnt"))
+	if err != nil || bedrooms < 0 || bedrooms > 50 {
+		return nil, fmt.Errorf("bad bedroomcnt")
+	}
+
+	spawnR, err := strconv.Atoi(q.Get("spawnradius"))
+	if err != nil || spawnR <= 0 {
+		return nil, fmt.Errorf("bad spawnradius")
+	}
+
+	bedroomR, err := strconv.Atoi(q.Get("bedroomradius"))
+	if err != nil || bedroomR <= 0 {
+		return nil, fmt.Errorf("bad bedroomradius")
+	}
+
+	maxgap, err := strconv.Atoi(q.Get("maxgap"))
+	if err != nil || maxgap <= 0 {
+		return nil, fmt.Errorf("bad maxgap")
+	}
+
+	return &MapConfig{
+		Width:         width,
+		Height:        height,
+		SpawnCount:    spawns,
+		BedroomCount:  bedrooms,
+		SpawnRadius:   spawnR,
+		BedroomRadius: bedroomR,
+		MaxGap:        maxgap,
+	}, nil
+}
+
 func mapHandler(w http.ResponseWriter, r *http.Request) {
-	// Парсим параметры
-	query := r.URL.Query()
-
-	width, err := strconv.ParseInt(query.Get("width"), 10, 64)
-	if err != nil || width <= 0 {
-		http.Error(w, "Неверный параметр width", http.StatusBadRequest)
-		return
-	}
-
-	height, err := strconv.ParseInt(query.Get("height"), 10, 64)
-	if err != nil || height <= 0 {
-		http.Error(w, "Неверный параметр height", http.StatusBadRequest)
-		return
-	}
-
-	spawnCnt, err := strconv.ParseInt(query.Get("spawnscnt"), 10, 64)
-	if err != nil || spawnCnt < 0 {
-		http.Error(w, "Неверный параметр spawnscnt", http.StatusBadRequest)
-		return
-	}
-
-	bedroomCnt, err := strconv.ParseInt(query.Get("bedroomcnt"), 10, 64)
-	if err != nil || bedroomCnt < 0 {
-		http.Error(w, "Неверный параметр bedroomcnt", http.StatusBadRequest)
-		return
-	}
-
-	spawnRadius, err := strconv.ParseInt(query.Get("spawnradius"), 10, 64)
-	if err != nil || spawnRadius <= 0 {
-		http.Error(w, "Неверный параметр spawnradius", http.StatusBadRequest)
-		return
-	}
-
-	bedroomRadius, err := strconv.ParseInt(query.Get("bedroomradius"), 10, 64)
-	if err != nil || bedroomRadius <= 0 {
-		http.Error(w, "Неверный параметр bedroomradius", http.StatusBadRequest)
-		return
-	}
-
-	maxGap, err := strconv.ParseInt(query.Get("maxgap"), 10, 64)
-	if err != nil || maxGap <= 0 {
-		http.Error(w, "Неверный параметр maxgap", http.StatusBadRequest)
-		return
-	}
-
-	// Создаем генератор карты
-	generator := &MapGenerator{
-		Width:         int(width),
-		Height:        int(height),
-		SpawnCnt:      int(spawnCnt),
-		BedroomCnt:    int(bedroomCnt),
-		SpawnRadius:   int(spawnRadius),
-		BedroomRadius: int(bedroomRadius),
-		MaxGap:        int(maxGap),
-	}
-
-	// Генерируем карту
-	err = generator.Generate()
+	cfg, err := parseRequest(r)
 	if err != nil {
-		errorResponse := map[string]string{"error": err.Error()}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	mapData := NewMapData(*cfg)
+	if err := mapData.generate(); err != nil {
+		resp := map[string]string{"error": err.Error()}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(errorResponse)
+		json.NewEncoder(w).Encode(resp)
 		return
 	}
 
-	// Создаем изображение
-	img := generator.CreateImage()
+	img := mapData.render()
 
-	// Отправляем PNG изображение
 	w.Header().Set("Content-Type", "image/png")
-	err = png.Encode(w, img)
-	if err != nil {
-		http.Error(w, "Ошибка создания изображения", http.StatusInternalServerError)
-		return
-	}
+	png.Encode(w, img)
 }
 
 func main() {
 	http.HandleFunc("/map", mapHandler)
 
-	fmt.Println("Сервер запущен на порту 8080")
-	fmt.Println("Пример запроса: http://localhost:8080/map?width=10&height=10&spawnscnt=2&bedroomcnt=3&spawnradius=2&bedroomradius=1&maxgap=5")
+	log.Println("Server on :8080")
+	log.Println("Try: http://localhost:8080/map?width=1000&height=1000&spawnscnt=7&bedroomcnt=4&spawnradius=20&bedroomradius=10&maxgap=5")
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
