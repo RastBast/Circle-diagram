@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -12,28 +13,61 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Circle struct {
-	X      int
-	Y      int
-	Radius int
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
+	Radius int    `json:"radius"`
+	Type   string `json:"type"` // "spawn" или "bedroom"
 }
 
 type MapConfig struct {
-	Width         int
-	Height        int
-	SpawnCount    int
-	BedroomCount  int
-	SpawnRadius   int
-	BedroomRadius int
-	MaxGap        int
+	Width         int `json:"width"`
+	Height        int `json:"height"`
+	SpawnCount    int `json:"spawn_count"`
+	BedroomCount  int `json:"bedroom_count"`
+	SpawnRadius   int `json:"spawn_radius"`
+	BedroomRadius int `json:"bedroom_radius"`
+	MaxGap        int `json:"max_gap"`
+}
+
+type SavedMap struct {
+	ID        int       `json:"id"`
+	Name      string    `json:"name"`
+	Config    MapConfig `json:"config"`
+	Circles   []Circle  `json:"circles"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type MapData struct {
 	config   MapConfig
 	spawns   []Circle
 	bedrooms []Circle
+}
+
+var db *sql.DB
+
+func initDB() error {
+	var err error
+	db, err = sql.Open("sqlite3", "./maps.db")
+	if err != nil {
+		return err
+	}
+
+	createTableSQL := `
+	CREATE TABLE IF NOT EXISTS maps (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		config TEXT NOT NULL,
+		circles TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`
+
+	_, err = db.Exec(createTableSQL)
+	return err
 }
 
 func NewMapData(cfg MapConfig) *MapData {
@@ -46,8 +80,16 @@ func NewMapData(cfg MapConfig) *MapData {
 
 func (m *MapData) getAllCircles() []Circle {
 	all := make([]Circle, 0, len(m.spawns)+len(m.bedrooms))
-	all = append(all, m.spawns...)
-	all = append(all, m.bedrooms...)
+	for _, c := range m.spawns {
+		circle := c
+		circle.Type = "spawn"
+		all = append(all, circle)
+	}
+	for _, c := range m.bedrooms {
+		circle := c
+		circle.Type = "bedroom"
+		all = append(all, circle)
+	}
 	return all
 }
 
@@ -92,10 +134,30 @@ func (m *MapData) findClosest(target Circle) float64 {
 	return minDist
 }
 
+func (m *MapData) generateNearbyPos(baseCircle Circle, newRadius int) (int, int) {
+	for attempts := 0; attempts < 100; attempts++ {
+		angle := rand.Float64() * 2 * math.Pi
+		minDist := float64(baseCircle.Radius + newRadius)
+		maxDist := minDist + float64(m.config.MaxGap)
+		dist := minDist + rand.Float64()*(maxDist-minDist)
+
+		x := int(float64(baseCircle.X) + dist*math.Cos(angle))
+		y := int(float64(baseCircle.Y) + dist*math.Sin(angle))
+
+		if x >= newRadius && x < m.config.Width-newRadius &&
+			y >= newRadius && y < m.config.Height-newRadius {
+			return x, y
+		}
+	}
+
+	x := newRadius + rand.Intn(m.config.Width-2*newRadius)
+	y := newRadius + rand.Intn(m.config.Height-2*newRadius)
+	return x, y
+}
+
 func (m *MapData) generate() error {
 	rand.Seed(time.Now().UnixNano())
 
-	// Place first spawn in center
 	if m.config.SpawnCount > 0 {
 		center := Circle{
 			X:      m.config.Width / 2,
@@ -108,21 +170,16 @@ func (m *MapData) generate() error {
 		}
 	}
 
-	// Place remaining spawns
 	for i := len(m.spawns); i < m.config.SpawnCount; i++ {
 		placed := false
 
-		for attempts := 0; attempts < 5000; attempts++ {
+		for attempts := 0; attempts < 10000; attempts++ {
 			var x, y int
 
 			existing := m.getAllCircles()
 			if len(existing) > 0 {
 				base := existing[rand.Intn(len(existing))]
-				angle := rand.Float64() * 2 * math.Pi
-				dist := float64(base.Radius + m.config.SpawnRadius + 1 + rand.Intn(50))
-
-				x = int(float64(base.X) + dist*math.Cos(angle))
-				y = int(float64(base.Y) + dist*math.Sin(angle))
+				x, y = m.generateNearbyPos(base, m.config.SpawnRadius)
 			} else {
 				x = m.config.SpawnRadius + rand.Intn(m.config.Width-2*m.config.SpawnRadius)
 				y = m.config.SpawnRadius + rand.Intn(m.config.Height-2*m.config.SpawnRadius)
@@ -142,21 +199,16 @@ func (m *MapData) generate() error {
 		}
 	}
 
-	// Place bedrooms
 	for i := 0; i < m.config.BedroomCount; i++ {
 		placed := false
 
-		for attempts := 0; attempts < 5000; attempts++ {
+		for attempts := 0; attempts < 10000; attempts++ {
 			var x, y int
 
 			existing := m.getAllCircles()
 			if len(existing) > 0 {
 				base := existing[rand.Intn(len(existing))]
-				angle := rand.Float64() * 2 * math.Pi
-				dist := float64(base.Radius + m.config.BedroomRadius + 1 + rand.Intn(50))
-
-				x = int(float64(base.X) + dist*math.Cos(angle))
-				y = int(float64(base.Y) + dist*math.Sin(angle))
+				x, y = m.generateNearbyPos(base, m.config.BedroomRadius)
 			} else {
 				x = m.config.BedroomRadius + rand.Intn(m.config.Width-2*m.config.BedroomRadius)
 				y = m.config.BedroomRadius + rand.Intn(m.config.Height-2*m.config.BedroomRadius)
@@ -176,44 +228,54 @@ func (m *MapData) generate() error {
 		}
 	}
 
-	// Check maxgap but dont fail, just warn
 	all := m.getAllCircles()
 	if len(all) > 1 {
+		violationCount := 0
 		for _, c := range all {
 			dist := m.findClosest(c)
 			if dist > float64(m.config.MaxGap) {
-				log.Printf("Warning: circle at (%d,%d) gap=%.1f > %d", 
-					c.X, c.Y, dist, m.config.MaxGap)
+				violationCount++
 			}
+		}
+		if violationCount > 0 {
+			log.Printf("Maxgap violations: %d/%d circles", violationCount, len(all))
 		}
 	}
 
 	return nil
 }
 
-func (m *MapData) render() *image.RGBA {
-	cellSize := 1
-	if m.config.Width <= 100 && m.config.Height <= 100 {
-		cellSize = 10
+func renderMap(config MapConfig, circles []Circle) *image.RGBA {
+	cellSize := 100
+	maxImageSize := 10000
+
+	if config.Width*cellSize > maxImageSize || config.Height*cellSize > maxImageSize {
+		cellSize = maxImageSize / max(config.Width, config.Height)
+		if cellSize < 1 {
+			cellSize = 1
+		}
 	}
 
-	w := m.config.Width * cellSize
-	h := m.config.Height * cellSize
+	w := config.Width * cellSize
+	h := config.Height * cellSize
 
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 
-	// White bg
 	white := color.RGBA{255, 255, 255, 255}
+	gray := color.RGBA{200, 200, 200, 255}
+	blue := color.RGBA{0, 0, 255, 255}
+	green := color.RGBA{0, 255, 0, 255}
+
+	// Белый фон
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			img.Set(x, y, white)
 		}
 	}
 
-	// Grid for small maps
-	if cellSize > 1 {
-		gray := color.RGBA{200, 200, 200, 255}
-		for i := 0; i <= m.config.Width; i++ {
+	// Сетка
+	if cellSize >= 5 {
+		for i := 0; i <= config.Width; i++ {
 			x := i * cellSize
 			for y := 0; y < h; y++ {
 				if x < w {
@@ -221,7 +283,7 @@ func (m *MapData) render() *image.RGBA {
 				}
 			}
 		}
-		for i := 0; i <= m.config.Height; i++ {
+		for i := 0; i <= config.Height; i++ {
 			y := i * cellSize
 			for x := 0; x < w; x++ {
 				if y < h {
@@ -231,24 +293,23 @@ func (m *MapData) render() *image.RGBA {
 		}
 	}
 
-	blue := color.RGBA{0, 0, 255, 255}
-	green := color.RGBA{0, 255, 0, 255}
-
-	// Draw circles
-	for _, c := range m.getAllCircles() {
+	// Круги
+	for _, c := range circles {
 		for dy := -c.Radius; dy <= c.Radius; dy++ {
 			for dx := -c.Radius; dx <= c.Radius; dx++ {
 				if dx*dx+dy*dy <= c.Radius*c.Radius {
 					cellX := c.X + dx
 					cellY := c.Y + dy
 
-					if cellX >= 0 && cellX < m.config.Width && 
-					   cellY >= 0 && cellY < m.config.Height {
+					if cellX >= 0 && cellX < config.Width &&
+						cellY >= 0 && cellY < config.Height {
 
+						startX := cellX * cellSize
+						startY := cellY * cellSize
 						for py := 0; py < cellSize; py++ {
 							for px := 0; px < cellSize; px++ {
-								imgX := cellX*cellSize + px
-								imgY := cellY*cellSize + py
+								imgX := startX + px
+								imgY := startY + py
 								if imgX < w && imgY < h {
 									img.Set(imgX, imgY, blue)
 								}
@@ -259,12 +320,14 @@ func (m *MapData) render() *image.RGBA {
 			}
 		}
 
-		// Center green
-		if c.X >= 0 && c.X < m.config.Width && c.Y >= 0 && c.Y < m.config.Height {
+		// Центр
+		if c.X >= 0 && c.X < config.Width && c.Y >= 0 && c.Y < config.Height {
+			startX := c.X * cellSize
+			startY := c.Y * cellSize
 			for py := 0; py < cellSize; py++ {
 				for px := 0; px < cellSize; px++ {
-					imgX := c.X*cellSize + px
-					imgY := c.Y*cellSize + py
+					imgX := startX + px
+					imgY := startY + py
 					if imgX < w && imgY < h {
 						img.Set(imgX, imgY, green)
 					}
@@ -273,48 +336,295 @@ func (m *MapData) render() *image.RGBA {
 		}
 	}
 
+	// Перерисовываем сетку
+	if cellSize >= 5 {
+		for i := 0; i <= config.Width; i++ {
+			x := i * cellSize
+			for y := 0; y < h; y++ {
+				if x < w {
+					img.Set(x, y, gray)
+				}
+			}
+		}
+		for i := 0; i <= config.Height; i++ {
+			y := i * cellSize
+			for x := 0; x < w; x++ {
+				if y < h {
+					img.Set(x, y, gray)
+				}
+			}
+		}
+	}
+
 	return img
 }
 
-func parseRequest(r *http.Request) (*MapConfig, error) {
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// CRUD API handlers
+
+// POST /api/maps - создать новую карту
+func createMapHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Name   string    `json:"name"`
+		Config MapConfig `json:"config"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Name == "" {
+		req.Name = fmt.Sprintf("Map_%d", time.Now().Unix())
+	}
+
+	// Генерируем карту
+	mapData := NewMapData(req.Config)
+	if err := mapData.generate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	circles := mapData.getAllCircles()
+
+	// Сохраняем в базу
+	configJSON, _ := json.Marshal(req.Config)
+	circlesJSON, _ := json.Marshal(circles)
+
+	result, err := db.Exec(
+		"INSERT INTO maps (name, config, circles) VALUES (?, ?, ?)",
+		req.Name, string(configJSON), string(circlesJSON))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	id, _ := result.LastInsertId()
+
+	savedMap := SavedMap{
+		ID:        int(id),
+		Name:      req.Name,
+		Config:    req.Config,
+		Circles:   circles,
+		CreatedAt: time.Now(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(savedMap)
+}
+
+// GET /api/maps - получить список всех карт
+func getMapsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rows, err := db.Query("SELECT id, name, config, created_at FROM maps ORDER BY created_at DESC")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var maps []struct {
+		ID        int       `json:"id"`
+		Name      string    `json:"name"`
+		Config    MapConfig `json:"config"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+
+	for rows.Next() {
+		var id int
+		var name string
+		var configJSON string
+		var createdAt time.Time
+
+		err := rows.Scan(&id, &name, &configJSON, &createdAt)
+		if err != nil {
+			continue
+		}
+
+		var config MapConfig
+		json.Unmarshal([]byte(configJSON), &config)
+
+		maps = append(maps, struct {
+			ID        int       `json:"id"`
+			Name      string    `json:"name"`
+			Config    MapConfig `json:"config"`
+			CreatedAt time.Time `json:"created_at"`
+		}{
+			ID:        id,
+			Name:      name,
+			Config:    config,
+			CreatedAt: createdAt,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(maps)
+}
+
+// GET /api/maps/{id} - получить конкретную карту
+func getMapHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := r.URL.Path[len("/api/maps/"):]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	var name, configJSON, circlesJSON string
+	var createdAt time.Time
+
+	err = db.QueryRow("SELECT name, config, circles, created_at FROM maps WHERE id = ?", id).
+		Scan(&name, &configJSON, &circlesJSON, &createdAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Map not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	var config MapConfig
+	var circles []Circle
+	json.Unmarshal([]byte(configJSON), &config)
+	json.Unmarshal([]byte(circlesJSON), &circles)
+
+	savedMap := SavedMap{
+		ID:        id,
+		Name:      name,
+		Config:    config,
+		Circles:   circles,
+		CreatedAt: createdAt,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(savedMap)
+}
+
+// GET /api/maps/{id}/image - получить изображение карты
+func getMapImageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := r.URL.Path[len("/api/maps/"):]
+	idStr = idStr[:len(idStr)-len("/image")]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	var configJSON, circlesJSON string
+	err = db.QueryRow("SELECT config, circles FROM maps WHERE id = ?", id).
+		Scan(&configJSON, &circlesJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "Map not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	var config MapConfig
+	var circles []Circle
+	json.Unmarshal([]byte(configJSON), &config)
+	json.Unmarshal([]byte(circlesJSON), &circles)
+
+	img := renderMap(config, circles)
+
+	w.Header().Set("Content-Type", "image/png")
+	png.Encode(w, img)
+}
+
+// DELETE /api/maps/{id} - удалить карту
+func deleteMapHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "DELETE" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := r.URL.Path[len("/api/maps/"):]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	result, err := db.Exec("DELETE FROM maps WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		http.Error(w, "Map not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Роутер для API
+func apiRouter(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/api/maps" && r.Method == "POST":
+		createMapHandler(w, r)
+	case r.URL.Path == "/api/maps" && r.Method == "GET":
+		getMapsHandler(w, r)
+	case len(r.URL.Path) > len("/api/maps/") && r.URL.Path[:len("/api/maps/")] == "/api/maps/":
+		if r.URL.Path[len(r.URL.Path)-6:] == "/image" {
+			getMapImageHandler(w, r)
+		} else {
+			if r.Method == "GET" {
+				getMapHandler(w, r)
+			} else if r.Method == "DELETE" {
+				deleteMapHandler(w, r)
+			} else {
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		}
+	default:
+		http.Error(w, "Not found", http.StatusNotFound)
+	}
+}
+
+// Legacy endpoint для обратной совместимости
+func legacyMapHandler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	width, err := strconv.Atoi(q.Get("width"))
-	if err != nil || width <= 0 || width > 2000 {
-		return nil, fmt.Errorf("bad width")
-	}
+	width, _ := strconv.Atoi(q.Get("width"))
+	height, _ := strconv.Atoi(q.Get("height"))
+	spawns, _ := strconv.Atoi(q.Get("spawnscnt"))
+	bedrooms, _ := strconv.Atoi(q.Get("bedroomcnt"))
+	spawnR, _ := strconv.Atoi(q.Get("spawnradius"))
+	bedroomR, _ := strconv.Atoi(q.Get("bedroomradius"))
+	maxgap, _ := strconv.Atoi(q.Get("maxgap"))
 
-	height, err := strconv.Atoi(q.Get("height"))
-	if err != nil || height <= 0 || height > 2000 {
-		return nil, fmt.Errorf("bad height")
-	}
-
-	spawns, err := strconv.Atoi(q.Get("spawnscnt"))
-	if err != nil || spawns < 0 || spawns > 50 {
-		return nil, fmt.Errorf("bad spawnscnt")
-	}
-
-	bedrooms, err := strconv.Atoi(q.Get("bedroomcnt"))
-	if err != nil || bedrooms < 0 || bedrooms > 50 {
-		return nil, fmt.Errorf("bad bedroomcnt")
-	}
-
-	spawnR, err := strconv.Atoi(q.Get("spawnradius"))
-	if err != nil || spawnR <= 0 {
-		return nil, fmt.Errorf("bad spawnradius")
-	}
-
-	bedroomR, err := strconv.Atoi(q.Get("bedroomradius"))
-	if err != nil || bedroomR <= 0 {
-		return nil, fmt.Errorf("bad bedroomradius")
-	}
-
-	maxgap, err := strconv.Atoi(q.Get("maxgap"))
-	if err != nil || maxgap <= 0 {
-		return nil, fmt.Errorf("bad maxgap")
-	}
-
-	return &MapConfig{
+	config := MapConfig{
 		Width:         width,
 		Height:        height,
 		SpawnCount:    spawns,
@@ -322,35 +632,39 @@ func parseRequest(r *http.Request) (*MapConfig, error) {
 		SpawnRadius:   spawnR,
 		BedroomRadius: bedroomR,
 		MaxGap:        maxgap,
-	}, nil
-}
+	}
 
-func mapHandler(w http.ResponseWriter, r *http.Request) {
-	cfg, err := parseRequest(r)
-	if err != nil {
+	mapData := NewMapData(config)
+	if err := mapData.generate(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	mapData := NewMapData(*cfg)
-	if err := mapData.generate(); err != nil {
-		resp := map[string]string{"error": err.Error()}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-		return
-	}
-
-	img := mapData.render()
+	circles := mapData.getAllCircles()
+	img := renderMap(config, circles)
 
 	w.Header().Set("Content-Type", "image/png")
 	png.Encode(w, img)
 }
 
 func main() {
-	http.HandleFunc("/map", mapHandler)
+	if err := initDB(); err != nil {
+		log.Fatal("Failed to init DB:", err)
+	}
+	defer db.Close()
+
+	http.HandleFunc("/api/", apiRouter)
+	http.HandleFunc("/map", legacyMapHandler) // старый endpoint
 
 	log.Println("Server on :8080")
-	log.Println("Try: http://localhost:8080/map?width=1000&height=1000&spawnscnt=7&bedroomcnt=4&spawnradius=20&bedroomradius=10&maxgap=5")
+	log.Println("API endpoints:")
+	log.Println("  POST   /api/maps              - create new map")
+	log.Println("  GET    /api/maps              - list all maps")
+	log.Println("  GET    /api/maps/{id}         - get specific map")
+	log.Println("  GET    /api/maps/{id}/image   - get map image")
+	log.Println("  DELETE /api/maps/{id}         - delete map")
+	log.Println("Legacy:")
+	log.Println("  GET    /map?params...         - generate image directly")
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
