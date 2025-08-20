@@ -24,13 +24,13 @@ type Circle struct {
 }
 
 type Config struct {
-	Width     int `json:"width"`
-	Height    int `json:"height"`
-	Spawns    int `json:"spawn_count"`
-	Bedrooms  int `json:"bedroom_count"`
-	SpawnR    int `json:"spawn_radius"`
-	BedroomR  int `json:"bedroom_radius"`
-	MaxGap    int `json:"max_gap"`
+	Width    int `json:"width"`
+	Height   int `json:"height"`
+	Spawns   int `json:"spawn_count"`
+	Bedrooms int `json:"bedroom_count"`
+	SpawnR   int `json:"spawn_radius"`
+	BedroomR int `json:"bedroom_radius"`
+	MaxGap   int `json:"max_gap"`
 }
 
 type Map struct {
@@ -47,33 +47,25 @@ type Generator struct {
 	bedrooms []Circle
 }
 
-// Структуры для распределения индексов
-type DistributeRequest struct {
-	MapID         int       `json:"map_id"`
-	Probabilities []float64 `json:"probabilities"`
+type DistributeReq struct {
+	MapID int       `json:"map_id"`
+	Probs []float64 `json:"probabilities"`
 }
 
-type CellData struct {
-	X       int   `json:"x"`
-	Y       int   `json:"y"`
-	Indices []int `json:"indices"`
+type Cell struct {
+	X    int   `json:"x"`
+	Y    int   `json:"y"`
+	Vals []int `json:"indices"`
 }
 
-type DistributeResponse struct {
-	MapID int        `json:"map_id"`
-	Cells []CellData `json:"cells"`
+type DistributeResp struct {
+	MapID int    `json:"map_id"`
+	Cells []Cell `json:"cells"`
 }
-
-// Типы клеток
-const (
-	CellWhite = 0  // белая (пустая)
-	CellBlue  = 1  // синяя (внутри круга)
-	CellGreen = 2  // зеленая (центр круга)
-)
 
 var db *sql.DB
 
-func setupDB() error {
+func initDB() error {
 	var err error
 	db, err = sql.Open("sqlite3", "./maps.db")
 	if err != nil {
@@ -119,7 +111,7 @@ func dist(c1, c2 Circle) float64 {
 	return math.Sqrt(dx*dx + dy*dy)
 }
 
-func overlap(c1, c2 Circle) bool {
+func hits(c1, c2 Circle) bool {
 	return dist(c1, c2) < float64(c1.Radius+c2.Radius)
 }
 
@@ -129,16 +121,16 @@ func (g *Generator) canPlace(c Circle) bool {
 		return false
 	}
 
-	for _, existing := range g.getAll() {
-		if overlap(c, existing) {
+	for _, ex := range g.getAll() {
+		if hits(c, ex) {
 			return false
 		}
 	}
 	return true
 }
 
-func (g *Generator) nearbyPos(base Circle, r int) (int, int) {
-	for i := 0; i < 50; i++ {
+func (g *Generator) nearPos(base Circle, r int) (int, int) {
+	for i := 0; i < 30; i++ {
 		angle := rand.Float64() * 2 * math.Pi
 		minD := float64(base.Radius + r)
 		maxD := minD + float64(g.cfg.MaxGap)
@@ -157,10 +149,10 @@ func (g *Generator) nearbyPos(base Circle, r int) (int, int) {
 	return x, y
 }
 
-func (g *Generator) gen() error {
+func (g *Generator) generate() error {
 	rand.Seed(time.Now().UnixNano())
 
-	// First spawn in center
+	// center spawn
 	if g.cfg.Spawns > 0 {
 		center := Circle{
 			X:      g.cfg.Width / 2,
@@ -172,16 +164,16 @@ func (g *Generator) gen() error {
 		}
 	}
 
-	// Rest of spawns
+	// other spawns
 	for i := len(g.spawns); i < g.cfg.Spawns; i++ {
 		placed := false
-		for try := 0; try < 5000; try++ {
+		for try := 0; try < 3000; try++ {
 			var x, y int
 
 			all := g.getAll()
 			if len(all) > 0 {
 				base := all[rand.Intn(len(all))]
-				x, y = g.nearbyPos(base, g.cfg.SpawnR)
+				x, y = g.nearPos(base, g.cfg.SpawnR)
 			} else {
 				x = g.cfg.SpawnR + rand.Intn(g.cfg.Width-2*g.cfg.SpawnR)
 				y = g.cfg.SpawnR + rand.Intn(g.cfg.Height-2*g.cfg.SpawnR)
@@ -199,16 +191,16 @@ func (g *Generator) gen() error {
 		}
 	}
 
-	// Bedrooms
+	// bedrooms
 	for i := 0; i < g.cfg.Bedrooms; i++ {
 		placed := false
-		for try := 0; try < 5000; try++ {
+		for try := 0; try < 3000; try++ {
 			var x, y int
 
 			all := g.getAll()
 			if len(all) > 0 {
 				base := all[rand.Intn(len(all))]
-				x, y = g.nearbyPos(base, g.cfg.BedroomR)
+				x, y = g.nearPos(base, g.cfg.BedroomR)
 			} else {
 				x = g.cfg.BedroomR + rand.Intn(g.cfg.Width-2*g.cfg.BedroomR)
 				y = g.cfg.BedroomR + rand.Intn(g.cfg.Height-2*g.cfg.BedroomR)
@@ -229,75 +221,68 @@ func (g *Generator) gen() error {
 	return nil
 }
 
-// Определяем тип клетки
-func getCellType(x, y int, circles []Circle) int {
+func cellType(x, y int, circles []Circle) int {
 	for _, c := range circles {
 		dx := x - c.X
 		dy := y - c.Y
 
-		// Центр круга
 		if dx == 0 && dy == 0 {
-			return CellGreen
+			return 2 // green
 		}
 
-		// Внутри круга
-		if dx*dx + dy*dy <= c.Radius*c.Radius {
-			return CellBlue
+		if dx*dx+dy*dy <= c.Radius*c.Radius {
+			return 1 // blue
 		}
 	}
 
-	return CellWhite
+	return 0 // white
 }
 
-// Создаем weighted selector
-func createWeightedSelector(probs []float64) []int {
-	var selector []int
+func makeSelector(probs []float64) []int {
+	var sel []int
 
 	for i, prob := range probs {
-		count := int(prob * 100)
-		for j := 0; j < count; j++ {
-			selector = append(selector, i)
+		cnt := int(prob * 50) // smaller scale
+		for j := 0; j < cnt; j++ {
+			sel = append(sel, i)
 		}
 	}
 
-	return selector
+	return sel
 }
 
-// Распределяем индексы по клеткам
-func distributeIndices(cfg Config, circles []Circle, probs []float64) []CellData {
-	var result []CellData
-	selector := createWeightedSelector(probs)
+func distribute(cfg Config, circles []Circle, probs []float64) []Cell {
+	var result []Cell
+	sel := makeSelector(probs)
 
-	if len(selector) == 0 {
+	if len(sel) == 0 {
 		return result
 	}
 
 	for y := 0; y < cfg.Height; y++ {
 		for x := 0; x < cfg.Width; x++ {
-			cellType := getCellType(x, y, circles)
-			var indices []int
+			ct := cellType(x, y, circles)
+			var vals []int
 
-			switch cellType {
-			case CellGreen:
-				indices = []int{0}
-
-			case CellBlue:
-				idx := selector[rand.Intn(len(selector))]
-				indices = []int{idx}
-
-			case CellWhite:
+			switch ct {
+			case 2: // green
+				vals = []int{0}
+			case 1: // blue
+				idx := sel[rand.Intn(len(sel))]
+				vals = []int{idx}
+			case 0: // white
 				count := 1 + rand.Intn(2)
-				indices = make([]int, count)
+				vals = make([]int, count)
 				for i := 0; i < count; i++ {
-					indices[i] = selector[rand.Intn(len(selector))]
+					vals[i] = sel[rand.Intn(len(sel))]
 				}
 			}
 
-			if len(indices) > 0 {
-				result = append(result, CellData{
-					X:       x,
-					Y:       y,
-					Indices: indices,
+			if len(vals) > 0 {
+				result = append(result, Cell{
+					X:    x,
+					Y:    y,
+					Vals: vals,
 				})
 			}
 		}
@@ -307,18 +292,18 @@ func distributeIndices(cfg Config, circles []Circle, probs []float64) []CellData
 }
 
 func render(cfg Config, circles []Circle) *image.RGBA {
-	cellSize := 100
-	maxSize := 8000
+	cs := 50 // smaller cell size
+	maxSz := 5000
 
-	if cfg.Width*cellSize > maxSize || cfg.Height*cellSize > maxSize {
-		cellSize = maxSize / max(cfg.Width, cfg.Height)
-		if cellSize < 1 {
-			cellSize = 1
+	if cfg.Width*cs > maxSz || cfg.Height*cs > maxSz {
+		cs = maxSz / max(cfg.Width, cfg.Height)
+		if cs < 1 {
+			cs = 1
 		}
 	}
 
-	w := cfg.Width * cellSize
-	h := cfg.Height * cellSize
+	w := cfg.Width * cs
+	h := cfg.Height * cs
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 
 	white := color.RGBA{255, 255, 255, 255}
@@ -326,34 +311,30 @@ func render(cfg Config, circles []Circle) *image.RGBA {
 	blue := color.RGBA{0, 0, 255, 255}
 	green := color.RGBA{0, 255, 0, 255}
 
-	// Fill white
+	// fill white
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			img.Set(x, y, white)
 		}
 	}
 
-	// Grid
-	if cellSize >= 3 {
+	// grid
+	if cs >= 2 {
 		for i := 0; i <= cfg.Width; i++ {
-			x := i * cellSize
-			for y := 0; y < h; y++ {
-				if x < w {
-					img.Set(x, y, gray)
-				}
+			x := i * cs
+			for y := 0; y < h && x < w; y++ {
+				img.Set(x, y, gray)
 			}
 		}
 		for i := 0; i <= cfg.Height; i++ {
-			y := i * cellSize
-			for x := 0; x < w; x++ {
-				if y < h {
-					img.Set(x, y, gray)
-				}
+			y := i * cs
+			for x := 0; x < w && y < h; x++ {
+				img.Set(x, y, gray)
 			}
 		}
 	}
 
-	// Circles
+	// circles
 	for _, c := range circles {
 		for dy := -c.Radius; dy <= c.Radius; dy++ {
 			for dx := -c.Radius; dx <= c.Radius; dx++ {
@@ -364,10 +345,10 @@ func render(cfg Config, circles []Circle) *image.RGBA {
 					if cellX >= 0 && cellX < cfg.Width &&
 						cellY >= 0 && cellY < cfg.Height {
 
-						startX := cellX * cellSize
-						startY := cellY * cellSize
-						for py := 0; py < cellSize; py++ {
-							for px := 0; px < cellSize; px++ {
+						startX := cellX * cs
+						startY := cellY * cs
+						for py := 0; py < cs; py++ {
+							for px := 0; px < cs; px++ {
 								imgX := startX + px
 								imgY := startY + py
 								if imgX < w && imgY < h {
@@ -380,12 +361,12 @@ func render(cfg Config, circles []Circle) *image.RGBA {
 			}
 		}
 
-		// Center
+		// center
 		if c.X >= 0 && c.X < cfg.Width && c.Y >= 0 && c.Y < cfg.Height {
-			startX := c.X * cellSize
-			startY := c.Y * cellSize
-			for py := 0; py < cellSize; py++ {
-				for px := 0; px < cellSize; px++ {
+			startX := c.X * cs
+			startY := c.Y * cs
+			for py := 0; py < cs; py++ {
+				for px := 0; px < cs; px++ {
 					imgX := startX + px
 					imgY := startY + py
 					if imgX < w && imgY < h {
@@ -406,9 +387,9 @@ func max(a, b int) int {
 	return b
 }
 
-func createMap(w http.ResponseWriter, r *http.Request) {
+func createHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		http.Error(w, "bad method", http.StatusMethodNotAllowed)
+		http.Error(w, "bad method", 405)
 		return
 	}
 
@@ -417,8 +398,8 @@ func createMap(w http.ResponseWriter, r *http.Request) {
 		Config Config `json:"config"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		http.Error(w, "bad json", 400)
 		return
 	}
 
@@ -427,8 +408,8 @@ func createMap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	gen := newGen(req.Config)
-	if err := gen.gen(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := gen.generate(); err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
 
@@ -441,7 +422,7 @@ func createMap(w http.ResponseWriter, r *http.Request) {
 		"INSERT INTO maps (name, config, circles) VALUES (?, ?, ?)",
 		req.Name, string(cfgJSON), string(circlesJSON))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 
@@ -459,10 +440,10 @@ func createMap(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func listMaps(w http.ResponseWriter, r *http.Request) {
+func listHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query("SELECT id, name, config, created_at FROM maps ORDER BY created_at DESC")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
@@ -498,11 +479,11 @@ func listMaps(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(maps)
 }
 
-func getMap(w http.ResponseWriter, r *http.Request) {
+func getHandler(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Path[len("/api/maps/"):]
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
+		http.Error(w, "bad id", 400)
 		return
 	}
 
@@ -513,9 +494,9 @@ func getMap(w http.ResponseWriter, r *http.Request) {
 		Scan(&name, &cfgJSON, &circlesJSON, &created)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			http.Error(w, "not found", http.StatusNotFound)
+			http.Error(w, "not found", 404)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), 500)
 		}
 		return
 	}
@@ -537,12 +518,12 @@ func getMap(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func getImage(w http.ResponseWriter, r *http.Request) {
+func imageHandler(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Path[len("/api/maps/"):]
-	idStr = idStr[:len(idStr)-6] // remove "/image"
+	idStr = idStr[:len(idStr)-6]
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
+		http.Error(w, "bad id", 400)
 		return
 	}
 
@@ -551,9 +532,9 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 		Scan(&cfgJSON, &circlesJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			http.Error(w, "not found", http.StatusNotFound)
+			http.Error(w, "not found", 404)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), 500)
 		}
 		return
 	}
@@ -569,51 +550,49 @@ func getImage(w http.ResponseWriter, r *http.Request) {
 	png.Encode(w, img)
 }
 
-func deleteMap(w http.ResponseWriter, r *http.Request) {
+func deleteHandler(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Path[len("/api/maps/"):]
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
+		http.Error(w, "bad id", 400)
 		return
 	}
 
 	result, err := db.Exec("DELETE FROM maps WHERE id = ?", id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, "not found", 404)
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	w.WriteHeader(204)
 }
 
-// Новый endpoint для распределения индексов
 func distributeHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		http.Error(w, "bad method", http.StatusMethodNotAllowed)
+		http.Error(w, "bad method", 405)
 		return
 	}
 
-	var req DistributeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+	var req DistributeReq
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		http.Error(w, "bad json", 400)
 		return
 	}
 
-	// Получаем карту из базы
 	var cfgJSON, circlesJSON string
 	err := db.QueryRow("SELECT config, circles FROM maps WHERE id = ?", req.MapID).
 		Scan(&cfgJSON, &circlesJSON)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			http.Error(w, "map not found", http.StatusNotFound)
+			http.Error(w, "map not found", 404)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), 500)
 		}
 		return
 	}
@@ -623,11 +602,10 @@ func distributeHandler(w http.ResponseWriter, r *http.Request) {
 	json.Unmarshal([]byte(cfgJSON), &cfg)
 	json.Unmarshal([]byte(circlesJSON), &circles)
 
-	// Распределяем индексы
 	rand.Seed(time.Now().UnixNano())
-	cells := distributeIndices(cfg, circles, req.Probabilities)
+	cells := distribute(cfg, circles, req.Probs)
 
-	resp := DistributeResponse{
+	resp := DistributeResp{
 		MapID: req.MapID,
 		Cells: cells,
 	}
@@ -639,25 +617,25 @@ func distributeHandler(w http.ResponseWriter, r *http.Request) {
 func apiHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/api/maps" && r.Method == "POST":
-		createMap(w, r)
+		createHandler(w, r)
 	case r.URL.Path == "/api/maps" && r.Method == "GET":
-		listMaps(w, r)
+		listHandler(w, r)
 	case r.URL.Path == "/api/distribute" && r.Method == "POST":
 		distributeHandler(w, r)
-	case len(r.URL.Path) > len("/api/maps/") && r.URL.Path[:len("/api/maps/")] == "/api/maps/":
-		if r.URL.Path[len(r.URL.Path)-6:] == "/image" {
-			getImage(w, r)
+	case len(r.URL.Path) > 10 && r.URL.Path[:10] == "/api/maps/":
+		if len(r.URL.Path) > 6 && r.URL.Path[len(r.URL.Path)-6:] == "/image" {
+			imageHandler(w, r)
 		} else {
 			if r.Method == "GET" {
-				getMap(w, r)
+				getHandler(w, r)
 			} else if r.Method == "DELETE" {
-				deleteMap(w, r)
+				deleteHandler(w, r)
 			} else {
-				http.Error(w, "bad method", http.StatusMethodNotAllowed)
+				http.Error(w, "bad method", 405)
 			}
 		}
 	default:
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, "not found", 404)
 	}
 }
 
@@ -683,8 +661,8 @@ func legacyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	gen := newGen(cfg)
-	if err := gen.gen(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := gen.generate(); err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
 
@@ -696,7 +674,7 @@ func legacyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	if err := setupDB(); err != nil {
+	if err := initDB(); err != nil {
 		log.Fatal("DB error:", err)
 	}
 	defer db.Close()
@@ -705,6 +683,5 @@ func main() {
 	http.HandleFunc("/map", legacyHandler)
 
 	log.Println("Server on :8080")
-	log.Println("NEW: POST /api/distribute - distribute indices by probabilities")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
