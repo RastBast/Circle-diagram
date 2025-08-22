@@ -47,20 +47,25 @@ type Generator struct {
 	bedrooms []Circle
 }
 
-type DistributeReq struct {
-	MapID int       `json:"map_id"`
-	Probs []float64 `json:"probabilities"`
-}
-
 type Cell struct {
 	X    int   `json:"x"`
 	Y    int   `json:"y"`
 	Vals []int `json:"indices"`
 }
 
-type DistributeResp struct {
-	MapID int    `json:"map_id"`
-	Cells []Cell `json:"cells"`
+type CreateDistributionReq struct {
+	MapID         int       `json:"map_id"`
+	Name          string    `json:"name"`
+	Probabilities []float64 `json:"probabilities"`
+}
+
+type SavedDistribution struct {
+	ID            int       `json:"id"`
+	MapID         int       `json:"map_id"`
+	Name          string    `json:"name"`
+	Probabilities []float64 `json:"probabilities"`
+	Cells         []Cell    `json:"cells"`
+	Created       time.Time `json:"created_at"`
 }
 
 var db *sql.DB
@@ -72,6 +77,7 @@ func initDB() error {
 		return err
 	}
 
+	// Таблица карт
 	sql := `CREATE TABLE IF NOT EXISTS maps (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL,
@@ -81,6 +87,22 @@ func initDB() error {
 	);`
 
 	_, err = db.Exec(sql)
+	if err != nil {
+		return err
+	}
+
+	// Таблица распределений
+	distSQL := `CREATE TABLE IF NOT EXISTS distributions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		map_id INTEGER NOT NULL,
+		name TEXT NOT NULL,
+		probabilities TEXT NOT NULL,
+		cells TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (map_id) REFERENCES maps(id) ON DELETE CASCADE
+	);`
+
+	_, err = db.Exec(distSQL)
 	return err
 }
 
@@ -152,7 +174,6 @@ func (g *Generator) nearPos(base Circle, r int) (int, int) {
 func (g *Generator) generate() error {
 	rand.Seed(time.Now().UnixNano())
 
-	// center spawn
 	if g.cfg.Spawns > 0 {
 		center := Circle{
 			X:      g.cfg.Width / 2,
@@ -164,7 +185,6 @@ func (g *Generator) generate() error {
 		}
 	}
 
-	// other spawns
 	for i := len(g.spawns); i < g.cfg.Spawns; i++ {
 		placed := false
 		for try := 0; try < 3000; try++ {
@@ -191,7 +211,6 @@ func (g *Generator) generate() error {
 		}
 	}
 
-	// bedrooms
 	for i := 0; i < g.cfg.Bedrooms; i++ {
 		placed := false
 		for try := 0; try < 3000; try++ {
@@ -242,7 +261,7 @@ func makeSelector(probs []float64) []int {
 	var sel []int
 
 	for i, prob := range probs {
-		cnt := int(prob * 50) // smaller scale
+		cnt := int(prob * 50)
 		for j := 0; j < cnt; j++ {
 			sel = append(sel, i)
 		}
@@ -291,8 +310,235 @@ func distribute(cfg Config, circles []Circle, probs []float64) []Cell {
 	return result
 }
 
+// Bitmap шрифт для цифр
+func getDigitBitmap(digit rune) [][]bool {
+	bitmaps := map[rune][][]bool{
+		'0': {
+			{false, true, true, true, false},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{false, true, true, true, false},
+		},
+		'1': {
+			{false, false, true, false, false},
+			{false, true, true, false, false},
+			{false, false, true, false, false},
+			{false, false, true, false, false},
+			{false, true, true, true, false},
+		},
+		'2': {
+			{false, true, true, true, false},
+			{true, false, false, false, true},
+			{false, false, true, true, false},
+			{false, true, true, false, false},
+			{true, true, true, true, true},
+		},
+		'3': {
+			{true, true, true, true, false},
+			{false, false, false, false, true},
+			{false, true, true, true, false},
+			{false, false, false, false, true},
+			{true, true, true, true, false},
+		},
+		'4': {
+			{true, false, false, true, false},
+			{true, false, false, true, false},
+			{true, true, true, true, true},
+			{false, false, false, true, false},
+			{false, false, false, true, false},
+		},
+		'5': {
+			{true, true, true, true, true},
+			{true, false, false, false, false},
+			{true, true, true, true, false},
+			{false, false, false, false, true},
+			{true, true, true, true, false},
+		},
+		'6': {
+			{false, true, true, true, false},
+			{true, false, false, false, false},
+			{true, true, true, true, false},
+			{true, false, false, false, true},
+			{false, true, true, true, false},
+		},
+		'7': {
+			{true, true, true, true, true},
+			{false, false, false, false, true},
+			{false, false, false, true, false},
+			{false, false, true, false, false},
+			{false, true, false, false, false},
+		},
+		'8': {
+			{false, true, true, true, false},
+			{true, false, false, false, true},
+			{false, true, true, true, false},
+			{true, false, false, false, true},
+			{false, true, true, true, false},
+		},
+		'9': {
+			{false, true, true, true, false},
+			{true, false, false, false, true},
+			{false, true, true, true, true},
+			{false, false, false, false, true},
+			{false, true, true, true, false},
+		},
+		',': {
+			{false, false, false, false, false},
+			{false, false, false, false, false},
+			{false, false, false, false, false},
+			{false, false, true, false, false},
+			{false, true, false, false, false},
+		},
+	}
+
+	if bitmap, exists := bitmaps[digit]; exists {
+		return bitmap
+	}
+	return nil
+}
+
+func drawText(img *image.RGBA, x, y, cellSize int, text string) {
+	black := color.RGBA{0, 0, 0, 255}
+
+	digitW, digitH := 5, 5
+	scale := cellSize / 15
+	if scale < 1 {
+		scale = 1
+	}
+
+	startX := x + (cellSize-len(text)*digitW*scale)/2
+	startY := y + (cellSize-digitH*scale)/2
+
+	for i, char := range text {
+		bitmap := getDigitBitmap(char)
+		if bitmap != nil {
+			for py := 0; py < digitH; py++ {
+				for px := 0; px < digitW; px++ {
+					if bitmap[py][px] {
+						for sy := 0; sy < scale; sy++ {
+							for sx := 0; sx < scale; sx++ {
+								imgX := startX + i*digitW*scale + px*scale + sx
+								imgY := startY + py*scale + sy
+								if imgX >= x && imgX < x+cellSize && imgY >= y && imgY < y+cellSize {
+									img.Set(imgX, imgY, black)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func renderWithIndices(cfg Config, circles []Circle, cells []Cell) *image.RGBA {
+	cs := 100 // Фиксированный размер клетки
+	maxSz := 8000
+
+	if cfg.Width*cs > maxSz || cfg.Height*cs > maxSz {
+		cs = maxSz / max(cfg.Width, cfg.Height)
+		if cs < 20 {
+			cs = 20 // Минимум для читаемости
+		}
+	}
+
+	w := cfg.Width * cs
+	h := cfg.Height * cs
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+
+	white := color.RGBA{255, 255, 255, 255}
+	gray := color.RGBA{128, 128, 128, 255}
+	blue := color.RGBA{0, 0, 255, 255}
+	green := color.RGBA{0, 255, 0, 255}
+
+	// Белый фон
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, white)
+		}
+	}
+
+	// Сетка
+	for i := 0; i <= cfg.Width; i++ {
+		x := i * cs
+		for y := 0; y < h && x < w; y++ {
+			img.Set(x, y, gray)
+		}
+	}
+	for i := 0; i <= cfg.Height; i++ {
+		y := i * cs
+		for x := 0; x < w && y < h; x++ {
+			img.Set(x, y, gray)
+		}
+	}
+
+	// Круги
+	for _, c := range circles {
+		for dy := -c.Radius; dy <= c.Radius; dy++ {
+			for dx := -c.Radius; dx <= c.Radius; dx++ {
+				if dx*dx+dy*dy <= c.Radius*c.Radius {
+					cellX := c.X + dx
+					cellY := c.Y + dy
+
+					if cellX >= 0 && cellX < cfg.Width &&
+						cellY >= 0 && cellY < cfg.Height {
+
+						startX := cellX * cs
+						startY := cellY * cs
+
+						cellColor := blue
+						if dx == 0 && dy == 0 {
+							cellColor = green
+						}
+
+						for py := 1; py < cs-1; py++ {
+							for px := 1; px < cs-1; px++ {
+								imgX := startX + px
+								imgY := startY + py
+								if imgX < w && imgY < h {
+									img.Set(imgX, imgY, cellColor)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Создаем карту индексов
+	cellMap := make(map[string][]int)
+	for _, cell := range cells {
+		key := fmt.Sprintf("%d,%d", cell.X, cell.Y)
+		cellMap[key] = cell.Vals
+	}
+
+	// Рисуем цифры
+	for y := 0; y < cfg.Height; y++ {
+		for x := 0; x < cfg.Width; x++ {
+			key := fmt.Sprintf("%d,%d", x, y)
+			if indices, exists := cellMap[key]; exists && len(indices) > 0 {
+				var text string
+				for i, idx := range indices {
+					if i > 0 {
+						text += ","
+					}
+					text += fmt.Sprintf("%d", idx)
+				}
+
+				cellX := x * cs
+				cellY := y * cs
+				drawText(img, cellX, cellY, cs, text)
+			}
+		}
+	}
+
+	return img
+}
+
 func render(cfg Config, circles []Circle) *image.RGBA {
-	cs := 50 // smaller cell size
+	cs := 50
 	maxSz := 5000
 
 	if cfg.Width*cs > maxSz || cfg.Height*cs > maxSz {
@@ -311,14 +557,12 @@ func render(cfg Config, circles []Circle) *image.RGBA {
 	blue := color.RGBA{0, 0, 255, 255}
 	green := color.RGBA{0, 255, 0, 255}
 
-	// fill white
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			img.Set(x, y, white)
 		}
 	}
 
-	// grid
 	if cs >= 2 {
 		for i := 0; i <= cfg.Width; i++ {
 			x := i * cs
@@ -334,7 +578,6 @@ func render(cfg Config, circles []Circle) *image.RGBA {
 		}
 	}
 
-	// circles
 	for _, c := range circles {
 		for dy := -c.Radius; dy <= c.Radius; dy++ {
 			for dx := -c.Radius; dx <= c.Radius; dx++ {
@@ -361,7 +604,6 @@ func render(cfg Config, circles []Circle) *image.RGBA {
 			}
 		}
 
-		// center
 		if c.X >= 0 && c.X < cfg.Width && c.Y >= 0 && c.Y < cfg.Height {
 			startX := c.X * cs
 			startY := c.Y * cs
@@ -440,6 +682,109 @@ func createHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func createDistributionHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "bad method", 405)
+		return
+	}
+
+	var req CreateDistributionReq
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		http.Error(w, "bad json", 400)
+		return
+	}
+
+	if req.Name == "" {
+		req.Name = fmt.Sprintf("dist_%d", time.Now().Unix())
+	}
+
+	var cfgJSON, circlesJSON string
+	err := db.QueryRow("SELECT config, circles FROM maps WHERE id = ?", req.MapID).
+		Scan(&cfgJSON, &circlesJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "map not found", 404)
+		} else {
+			http.Error(w, err.Error(), 500)
+		}
+		return
+	}
+
+	var cfg Config
+	var circles []Circle
+	json.Unmarshal([]byte(cfgJSON), &cfg)
+	json.Unmarshal([]byte(circlesJSON), &circles)
+
+	rand.Seed(time.Now().UnixNano())
+	cells := distribute(cfg, circles, req.Probabilities)
+
+	probsJSON, _ := json.Marshal(req.Probabilities)
+	cellsJSON, _ := json.Marshal(cells)
+
+	result, err := db.Exec(
+		"INSERT INTO distributions (map_id, name, probabilities, cells) VALUES (?, ?, ?, ?)",
+		req.MapID, req.Name, string(probsJSON), string(cellsJSON))
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	id, _ := result.LastInsertId()
+
+	resp := SavedDistribution{
+		ID:            int(id),
+		MapID:         req.MapID,
+		Name:          req.Name,
+		Probabilities: req.Probabilities,
+		Cells:         cells,
+		Created:       time.Now(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func getDistributionImageHandler(w http.ResponseWriter, r *http.Request) {
+	idStr := r.URL.Path[len("/api/distributions/"):]
+	idStr = idStr[:len(idStr)-6]
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "bad id", 400)
+		return
+	}
+
+	var mapID int
+	var cfgJSON, circlesJSON, cellsJSON string
+
+	err = db.QueryRow(`
+		SELECT d.map_id, m.config, m.circles, d.cells 
+		FROM distributions d 
+		JOIN maps m ON d.map_id = m.id 
+		WHERE d.id = ?`, id).
+		Scan(&mapID, &cfgJSON, &circlesJSON, &cellsJSON)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "not found", 404)
+		} else {
+			http.Error(w, err.Error(), 500)
+		}
+		return
+	}
+
+	var cfg Config
+	var circles []Circle
+	var cells []Cell
+	json.Unmarshal([]byte(cfgJSON), &cfg)
+	json.Unmarshal([]byte(circlesJSON), &circles)
+	json.Unmarshal([]byte(cellsJSON), &cells)
+
+	img := renderWithIndices(cfg, circles, cells)
+
+	w.Header().Set("Content-Type", "image/png")
+	png.Encode(w, img)
+}
+
 func listHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query("SELECT id, name, config, created_at FROM maps ORDER BY created_at DESC")
 	if err != nil {
@@ -479,45 +824,6 @@ func listHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(maps)
 }
 
-func getHandler(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Path[len("/api/maps/"):]
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "bad id", 400)
-		return
-	}
-
-	var name, cfgJSON, circlesJSON string
-	var created time.Time
-
-	err = db.QueryRow("SELECT name, config, circles, created_at FROM maps WHERE id = ?", id).
-		Scan(&name, &cfgJSON, &circlesJSON, &created)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			http.Error(w, "not found", 404)
-		} else {
-			http.Error(w, err.Error(), 500)
-		}
-		return
-	}
-
-	var cfg Config
-	var circles []Circle
-	json.Unmarshal([]byte(cfgJSON), &cfg)
-	json.Unmarshal([]byte(circlesJSON), &circles)
-
-	resp := Map{
-		ID:      id,
-		Name:    name,
-		Config:  cfg,
-		Circles: circles,
-		Created: created,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
 func imageHandler(w http.ResponseWriter, r *http.Request) {
 	idStr := r.URL.Path[len("/api/maps/"):]
 	idStr = idStr[:len(idStr)-6]
@@ -550,89 +856,21 @@ func imageHandler(w http.ResponseWriter, r *http.Request) {
 	png.Encode(w, img)
 }
 
-func deleteHandler(w http.ResponseWriter, r *http.Request) {
-	idStr := r.URL.Path[len("/api/maps/"):]
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		http.Error(w, "bad id", 400)
-		return
-	}
-
-	result, err := db.Exec("DELETE FROM maps WHERE id = ?", id)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		http.Error(w, "not found", 404)
-		return
-	}
-
-	w.WriteHeader(204)
-}
-
-func distributeHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "bad method", 405)
-		return
-	}
-
-	var req DistributeReq
-	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		http.Error(w, "bad json", 400)
-		return
-	}
-
-	var cfgJSON, circlesJSON string
-	err := db.QueryRow("SELECT config, circles FROM maps WHERE id = ?", req.MapID).
-		Scan(&cfgJSON, &circlesJSON)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			http.Error(w, "map not found", 404)
-		} else {
-			http.Error(w, err.Error(), 500)
-		}
-		return
-	}
-
-	var cfg Config
-	var circles []Circle
-	json.Unmarshal([]byte(cfgJSON), &cfg)
-	json.Unmarshal([]byte(circlesJSON), &circles)
-
-	rand.Seed(time.Now().UnixNano())
-	cells := distribute(cfg, circles, req.Probs)
-
-	resp := DistributeResp{
-		MapID: req.MapID,
-		Cells: cells,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
-
 func apiHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/api/maps" && r.Method == "POST":
 		createHandler(w, r)
 	case r.URL.Path == "/api/maps" && r.Method == "GET":
 		listHandler(w, r)
-	case r.URL.Path == "/api/distribute" && r.Method == "POST":
-		distributeHandler(w, r)
+	case r.URL.Path == "/api/distributions" && r.Method == "POST":
+		createDistributionHandler(w, r)
+	case len(r.URL.Path) > 18 && r.URL.Path[:18] == "/api/distributions":
+		if len(r.URL.Path) > 6 && r.URL.Path[len(r.URL.Path)-6:] == "/image" {
+			getDistributionImageHandler(w, r)
+		}
 	case len(r.URL.Path) > 10 && r.URL.Path[:10] == "/api/maps/":
 		if len(r.URL.Path) > 6 && r.URL.Path[len(r.URL.Path)-6:] == "/image" {
 			imageHandler(w, r)
-		} else {
-			if r.Method == "GET" {
-				getHandler(w, r)
-			} else if r.Method == "DELETE" {
-				deleteHandler(w, r)
-			} else {
-				http.Error(w, "bad method", 405)
-			}
 		}
 	default:
 		http.Error(w, "not found", 404)
@@ -683,5 +921,7 @@ func main() {
 	http.HandleFunc("/map", legacyHandler)
 
 	log.Println("Server on :8080")
+	log.Println("NEW: POST /api/distributions - create distribution with indices")
+	log.Println("NEW: GET /api/distributions/{id}/image - get image with numbers")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
