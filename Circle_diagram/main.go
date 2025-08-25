@@ -49,11 +49,10 @@ type Generator struct {
 	bedrooms []Circle
 }
 
-// Компактная структура для экономии памяти
-type CompactCell struct {
-	X uint16 `json:"x"`
-	Y uint16 `json:"y"`
-	V string `json:"v"` // "0,1" вместо массива
+type Cell struct {
+	X    int   `json:"x"`
+	Y    int   `json:"y"`
+	Vals []int `json:"indices"`
 }
 
 var db *sql.DB
@@ -232,7 +231,7 @@ func makeSelector(probs []float64) []int {
 	var sel []int
 
 	for i, prob := range probs {
-		cnt := int(prob * 10) // уменьшили точность для экономии памяти
+		cnt := int(prob * 50) // достаточная точность
 		for j := 0; j < cnt; j++ {
 			sel = append(sel, i)
 		}
@@ -241,80 +240,310 @@ func makeSelector(probs []float64) []int {
 	return sel
 }
 
-// Мини-шрифт 3x3 для цифр
-func drawDigit3x3(img *image.RGBA, startX, startY int, digit rune, col color.Color) {
-	patterns := map[rune][3][3]bool{
-		'0': {{true, true, true}, {true, false, true}, {true, true, true}},
-		'1': {{false, true, false}, {false, true, false}, {false, true, false}},
-		'2': {{true, true, true}, {false, true, true}, {true, true, true}},
-		'3': {{true, true, true}, {false, true, true}, {true, true, true}},
-		'4': {{true, false, true}, {true, true, true}, {false, false, true}},
-		'5': {{true, true, true}, {true, true, false}, {true, true, true}},
-		'6': {{true, true, true}, {true, true, false}, {true, true, true}},
-		'7': {{true, true, true}, {false, false, true}, {false, false, true}},
-		'8': {{true, true, true}, {true, true, true}, {true, true, true}},
-		'9': {{true, true, true}, {true, true, true}, {false, false, true}},
-		',': {{false, false, false}, {false, false, false}, {false, true, false}},
+// Четкие bitmap шрифты для цифр 15×20 пикселей
+func getDigitBitmap(digit rune) [][]bool {
+	switch digit {
+	case '0':
+		return [][]bool{
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '1':
+		return [][]bool{
+			{false, false, false, false, false, false, true, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, true, true, true, true, false, false, false, false, false, false},
+			{false, false, false, false, true, true, true, true, true, false, false, false, false, false, false},
+			{false, false, false, true, true, true, false, true, true, false, false, false, false, false, false},
+			{false, false, true, true, true, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, false, false, false, false, false, false},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '2':
+		return [][]bool{
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, true, true, true, false},
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, true, true, true, false, false, false},
+			{false, false, false, false, false, false, false, false, true, true, true, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, true, false, false, false, false, false},
+			{false, false, false, false, false, false, true, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, true, true, true, false, false, false, false, false, false, false},
+			{false, false, false, false, true, true, true, false, false, false, false, false, false, false, false},
+			{true, true, false, true, true, true, false, false, false, false, false, false, false, false, false},
+			{true, true, true, true, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '3':
+		return [][]bool{
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, true, false},
+			{false, false, false, false, false, false, true, true, true, true, true, true, false, false, false},
+			{false, false, false, false, false, false, true, true, true, true, true, true, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, true, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '4':
+		return [][]bool{
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, true, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, true, true, true, true, true, false, false},
+			{false, false, false, false, false, false, false, true, true, false, true, true, true, false, false},
+			{false, false, false, false, false, false, true, true, true, false, true, true, true, false, false},
+			{false, false, false, false, false, true, true, true, false, false, true, true, true, false, false},
+			{false, false, false, false, true, true, true, false, false, false, true, true, true, false, false},
+			{false, false, false, true, true, true, false, false, false, false, true, true, true, false, false},
+			{false, false, true, true, true, false, false, false, false, false, true, true, true, false, false},
+			{false, true, true, true, false, false, false, false, false, false, true, true, true, false, false},
+			{true, true, true, false, false, false, false, false, false, false, true, true, true, false, false},
+			{true, true, false, false, false, false, false, false, false, false, true, true, true, false, false},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '5':
+		return [][]bool{
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '6':
+		return [][]bool{
+			{false, false, false, false, true, true, true, true, true, true, true, true, false, false, false},
+			{false, false, false, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, false, true, true, true, false, false, false, false, false, false, false, true, true, false},
+			{false, true, true, true, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, true, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, true, true, true, true, true, true, true, true, true, true, false, false},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '7':
+		return [][]bool{
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{true, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, true, true, true, false},
+			{false, false, false, false, false, false, false, false, false, false, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, true, true, true, false, false, false},
+			{false, false, false, false, false, false, false, false, true, true, true, false, false, false, false},
+			{false, false, false, false, false, false, false, true, true, true, false, false, false, false, false},
+			{false, false, false, false, false, false, true, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, true, true, true, false, false, false, false, false, false, false},
+			{false, false, false, false, true, true, true, false, false, false, false, false, false, false, false},
+			{false, false, false, true, true, true, false, false, false, false, false, false, false, false, false},
+			{false, false, true, true, true, false, false, false, false, false, false, false, false, false, false},
+			{false, true, true, true, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, true, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '8':
+		return [][]bool{
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case '9':
+		return [][]bool{
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, false},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, true, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, true, true, true, true, true, true, true, true, true, true, true, true, true, true},
+			{false, false, true, true, true, true, true, true, true, true, true, true, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, true, true},
+			{true, true, false, false, false, false, false, false, false, false, false, false, true, true, true},
+			{false, true, true, false, false, false, false, false, false, false, false, true, true, true, false},
+			{false, false, true, true, true, true, true, true, true, true, true, true, true, false, false},
+			{false, false, false, true, true, true, true, true, true, true, true, true, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	case ',':
+		return [][]bool{
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, true, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, true, true, true, false, false, false, false, false, false},
+			{false, false, false, false, false, false, true, true, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, true, false, false, false, false, false, false, false},
+			{false, false, false, false, false, true, true, true, false, false, false, false, false, false, false},
+			{false, false, false, false, false, false, false, false, false, false, false, false, false, false, false},
+		}
+	default:
+		// Пустой bitmap для неизвестных символов
+		return make([][]bool, 20)
 	}
+}
 
-	if pattern, ok := patterns[digit]; ok {
-		for py := 0; py < 3; py++ {
-			for px := 0; px < 3; px++ {
-				if pattern[py][px] {
-					img.Set(startX+px, startY+py, col)
-				}
+// Отрисовка четкой цифры 15×20 пикселей
+func drawLargeDigit(img *image.RGBA, x, y int, digit rune, col color.Color) {
+	bitmap := getDigitBitmap(digit)
+	for py := 0; py < len(bitmap); py++ {
+		for px := 0; px < len(bitmap[py]); px++ {
+			if bitmap[py][px] {
+				img.Set(x+px, y+py, col)
 			}
 		}
 	}
 }
 
-// Оптимизированный рендеринг с малыми клетками
-func renderOptimized(cfg Config, circles []Circle, probs []float64) *image.RGBA {
-	// Адаптивный размер клеток
-	cellSize := 16
-	if cfg.Width > 200 || cfg.Height > 200 {
-		cellSize = 8
+// Рендеринг с крупными клетками 100×100 и четкими цифрами
+func renderLargeCells(cfg Config, circles []Circle, probs []float64) *image.RGBA {
+	cellSize := 100 // ФИКСИРОВАННЫЙ размер 100×100
+
+	// Ограничение размера карты для экономии памяти
+	maxCells := 500 // максимум 500×500 клеток = 250МБ изображение
+	if cfg.Width > maxCells {
+		cfg.Width = maxCells
 	}
-	if cfg.Width > 500 || cfg.Height > 500 {
-		cellSize = 4
-	}
-	if cfg.Width > 1000 || cfg.Height > 1000 {
-		cellSize = 2
+	if cfg.Height > maxCells {
+		cfg.Height = maxCells
 	}
 
 	w := cfg.Width * cellSize
 	h := cfg.Height * cellSize
-
-	// Максимальный размер изображения 50МБ
-	maxPixels := 12500000 // ~50MB / 4 bytes per pixel
-	if w*h > maxPixels {
-		scale := math.Sqrt(float64(maxPixels) / float64(w*h))
-		cellSize = max(1, int(float64(cellSize)*scale))
-		w = cfg.Width * cellSize
-		h = cfg.Height * cellSize
-	}
-
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 
+	// Цвета
 	white := color.RGBA{255, 255, 255, 255}
-	gray := color.RGBA{200, 200, 200, 255}
+	gray := color.RGBA{128, 128, 128, 255}
 	blue := color.RGBA{100, 150, 255, 255}
 	green := color.RGBA{100, 255, 100, 255}
 	black := color.RGBA{0, 0, 0, 255}
-
-	// Заливаем белым
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			img.Set(x, y, white)
-		}
-	}
 
 	sel := makeSelector(probs)
 	if len(sel) == 0 {
 		sel = []int{0}
 	}
 
-	// Обрабатываем по клеткам
+	// Генерация по клеткам
 	for mapY := 0; mapY < cfg.Height; mapY++ {
 		for mapX := 0; mapX < cfg.Width; mapX++ {
 			ct := cellType(mapX, mapY, circles)
@@ -322,62 +551,44 @@ func renderOptimized(cfg Config, circles []Circle, probs []float64) *image.RGBA 
 			startX := mapX * cellSize
 			startY := mapY * cellSize
 
-			// Определяем цвет и индексы
-			var bgColor color.Color = white
+			// Определяем цвет фона и индексы
+			var bgColor color.Color
 			var indices []int
 
 			switch ct {
-			case 2: // green
+			case 2: // зеленая (центр)
 				bgColor = green
 				indices = []int{0}
-			case 1: // blue
+			case 1: // синяя (внутри круга)
 				bgColor = blue
 				indices = []int{sel[rand.Intn(len(sel))]}
-			case 0: // white
+			case 0: // белая (пустая) - ТОЛЬКО ОДИН ИНДЕКС
 				bgColor = white
-				count := 1 + rand.Intn(2)
-				indices = make([]int, count)
-				for i := 0; i < count; i++ {
-					indices[i] = sel[rand.Intn(len(sel))]
-				}
+				indices = []int{sel[rand.Intn(len(sel))]}
 			}
 
 			// Заливаем клетку
 			for py := 0; py < cellSize; py++ {
 				for px := 0; px < cellSize; px++ {
-					if startX+px < w && startY+py < h {
-						img.Set(startX+px, startY+py, bgColor)
-					}
+					img.Set(startX+px, startY+py, bgColor)
 				}
 			}
 
-			// Рисуем цифры если клетка достаточно большая
-			if cellSize >= 4 && len(indices) > 0 {
-				centerX := startX + (cellSize-3)/2
-				centerY := startY + (cellSize-3)/2
-
-				if len(indices) == 1 {
-					drawDigit3x3(img, centerX, centerY, rune('0'+indices[0]), black)
-				} else if len(indices) == 2 {
-					drawDigit3x3(img, centerX-2, centerY, rune('0'+indices[0]), black)
-					drawDigit3x3(img, centerX+2, centerY, rune('0'+indices[1]), black)
-				}
+			// Рамка клетки
+			for py := 0; py < cellSize; py++ {
+				img.Set(startX+cellSize-1, startY+py, gray) // правая
+				img.Set(startX, startY+py, gray)            // левая
+			}
+			for px := 0; px < cellSize; px++ {
+				img.Set(startX+px, startY+cellSize-1, gray) // нижняя
+				img.Set(startX+px, startY, gray)            // верхняя
 			}
 
-			// Сетка (если клетки достаточно большие)
-			if cellSize >= 4 {
-				// Правая граница
-				if startX+cellSize < w {
-					for py := 0; py < cellSize; py++ {
-						img.Set(startX+cellSize, startY+py, gray)
-					}
-				}
-				// Нижняя граница
-				if startY+cellSize < h {
-					for px := 0; px < cellSize; px++ {
-						img.Set(startX+px, startY+cellSize, gray)
-					}
-				}
+			// ЧЕТКИЕ цифры в центре клетки
+			if len(indices) > 0 && indices[0] >= 0 && indices[0] <= 9 {
+				centerX := startX + (cellSize-15)/2
+				centerY := startY + (cellSize-20)/2
+				drawLargeDigit(img, centerX, centerY, rune('0'+indices[0]), black)
 			}
 		}
 	}
@@ -392,7 +603,7 @@ func max(a, b int) int {
 	return b
 }
 
-// Оптимизированный legacy handler
+// Legacy handler с крупными клетками и четкими цифрами
 func legacyHandler(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -423,7 +634,7 @@ func legacyHandler(w http.ResponseWriter, r *http.Request) {
 	circles := gen.getAll()
 
 	// Парсим вероятности из URL
-	probs := []float64{99.0, 1.0} // по умолчанию
+	probs := []float64{90.0, 10.0} // по умолчанию
 	if probsStr := q.Get("probs"); probsStr != "" {
 		probStrs := strings.Split(probsStr, ",")
 		probs = make([]float64, len(probStrs))
@@ -436,8 +647,8 @@ func legacyHandler(w http.ResponseWriter, r *http.Request) {
 
 	rand.Seed(time.Now().UnixNano())
 
-	// Оптимизированный рендеринг
-	img := renderOptimized(cfg, circles, probs)
+	// Рендеринг с крупными клетками
+	img := renderLargeCells(cfg, circles, probs)
 
 	w.Header().Set("Content-Type", "image/png")
 	png.Encode(w, img)
@@ -496,10 +707,92 @@ func createHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func distribute(cfg Config, circles []Circle, probs []float64) []Cell {
+	var result []Cell
+	sel := makeSelector(probs)
+
+	if len(sel) == 0 {
+		return result
+	}
+
+	for y := 0; y < cfg.Height; y++ {
+		for x := 0; x < cfg.Width; x++ {
+			ct := cellType(x, y, circles)
+			var vals []int
+
+			switch ct {
+			case 2: // green
+				vals = []int{0}
+			case 1: // blue
+				idx := sel[rand.Intn(len(sel))]
+				vals = []int{idx}
+			case 0: // white - ТОЛЬКО ОДИН ИНДЕКС
+				vals = []int{sel[rand.Intn(len(sel))]}
+			}
+
+			if len(vals) > 0 {
+				result = append(result, Cell{
+					X:    x,
+					Y:    y,
+					Vals: vals,
+				})
+			}
+		}
+	}
+
+	return result
+}
+
+func distributeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "bad method", 405)
+		return
+	}
+
+	var req struct {
+		MapID int       `json:"map_id"`
+		Probs []float64 `json:"probabilities"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		http.Error(w, "bad json", 400)
+		return
+	}
+
+	var cfgJSON, circlesJSON string
+	err := db.QueryRow("SELECT config, circles FROM maps WHERE id = ?", req.MapID).
+		Scan(&cfgJSON, &circlesJSON)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			http.Error(w, "map not found", 404)
+		} else {
+			http.Error(w, err.Error(), 500)
+		}
+		return
+	}
+
+	var cfg Config
+	var circles []Circle
+	json.Unmarshal([]byte(cfgJSON), &cfg)
+	json.Unmarshal([]byte(circlesJSON), &circles)
+
+	rand.Seed(time.Now().UnixNano())
+	cells := distribute(cfg, circles, req.Probs)
+
+	resp := struct {
+		MapID int    `json:"map_id"`
+		Cells []Cell `json:"cells"`
+	}{req.MapID, cells}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 func apiHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/api/maps" && r.Method == "POST":
 		createHandler(w, r)
+	case r.URL.Path == "/api/distribute" && r.Method == "POST":
+		distributeHandler(w, r)
 	default:
 		http.Error(w, "not found", 404)
 	}
@@ -515,7 +808,9 @@ func main() {
 	http.HandleFunc("/map", legacyHandler)
 
 	log.Println("Server on :8080")
-	log.Println("OPTIMIZED: Memory usage reduced 100x")
-	log.Println("NEW: ?probs=70,25,5 parameter for probabilities")
+	log.Println("✓ Large 100×100px cells with crisp digits")
+	log.Println("✓ Single number per white cell")
+	log.Println("✓ High quality 15×20px bitmap fonts")
+	log.Println("✓ Parameter: ?probs=70,25,5")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
