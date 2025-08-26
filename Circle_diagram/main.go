@@ -352,6 +352,15 @@ var digitPatterns = map[rune][][]bool{
 		{false, false, false, false, true},
 		{true, true, true, true, true},
 	},
+	',': {
+		{false, false, false, false, false},
+		{false, false, false, false, false},
+		{false, false, false, false, false},
+		{false, false, false, false, false},
+		{false, false, false, false, false},
+		{false, false, true, false, false},
+		{false, true, false, false, false},
+	},
 }
 
 // Отрисовка цифры
@@ -412,18 +421,22 @@ func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64)
 			startY := mapY * cellSize
 
 			var backgroundColor color.Color
-			var digitValue int
+			var indices []int
 
 			switch cellType {
 			case 2: // зеленая клетка (центр круга)
 				backgroundColor = green
-				digitValue = 0
+				indices = []int{0}
 			case 1: // синяя клетка (внутри круга)
 				backgroundColor = blue
-				digitValue = selector[rand.Intn(len(selector))]
-			case 0: // белая клетка (пустая)
+				indices = []int{selector[rand.Intn(len(selector))]}
+			case 0: // белая клетка (пустая) - 1 или 2 числа
 				backgroundColor = white
-				digitValue = selector[rand.Intn(len(selector))]
+				count := 1 + rand.Intn(2) // 1 или 2 числа
+				indices = make([]int, count)
+				for i := 0; i < count; i++ {
+					indices[i] = selector[rand.Intn(len(selector))]
+				}
 			}
 
 			// Заливаем клетку цветом
@@ -443,11 +456,29 @@ func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64)
 				img.Set(startX+px, startY, gray)            // верхняя
 			}
 
-			// Рисуем цифру в центре клетки
-			if digitValue >= 0 && digitValue <= 9 {
-				digitX := startX + (cellSize-5*8)/2 // центрируем цифру 5x7 с масштабом 8
+			// Рисуем цифры в центре клетки
+			if len(indices) == 1 && indices[0] >= 0 && indices[0] <= 9 {
+				// Одна цифра по центру
+				digitX := startX + (cellSize-5*8)/2
 				digitY := startY + (cellSize-7*8)/2
-				drawDigit(img, digitX, digitY, rune('0'+digitValue), 8)
+				drawDigit(img, digitX, digitY, rune('0'+indices[0]), 8)
+			} else if len(indices) == 2 {
+				// Две цифры рядом
+				if indices[0] >= 0 && indices[0] <= 9 {
+					digitX := startX + (cellSize-11*8)/2 // левая цифра
+					digitY := startY + (cellSize-7*8)/2
+					drawDigit(img, digitX, digitY, rune('0'+indices[0]), 8)
+				}
+				// Запятая
+				commaX := startX + (cellSize-1*8)/2
+				commaY := startY + (cellSize-7*8)/2
+				drawDigit(img, commaX, commaY, ',', 8)
+
+				if indices[1] >= 0 && indices[1] <= 9 {
+					digitX := startX + (cellSize-11*8)/2 + 7*8 // правая цифра
+					digitY := startY + (cellSize-7*8)/2
+					drawDigit(img, digitX, digitY, rune('0'+indices[1]), 8)
+				}
 			}
 		}
 	}
@@ -635,8 +666,12 @@ func generateDistribution(cfg Config, circles []Circle, probabilities []float64)
 				values = []int{0}
 			case 1: // синяя клетка
 				values = []int{selector[rand.Intn(len(selector))]}
-			case 0: // белая клетка
-				values = []int{selector[rand.Intn(len(selector))]}
+			case 0: // белая клетка - 1 или 2 числа
+				count := 1 + rand.Intn(2)
+				values = make([]int, count)
+				for i := 0; i < count; i++ {
+					values[i] = selector[rand.Intn(len(selector))]
+				}
 			}
 
 			if len(values) > 0 {
