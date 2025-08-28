@@ -14,10 +14,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// Базовые структуры данных
 type Circle struct {
 	X      int    `json:"x"`
 	Y      int    `json:"y"`
@@ -49,10 +49,8 @@ type Cell struct {
 	Vals []int `json:"indices"`
 }
 
-// Глобальная переменная для БД
 var db *sql.DB
 
-// Инициализация базы данных
 func initDB() error {
 	var err error
 	db, err = sql.Open("sqlite3", "./maps.db")
@@ -72,7 +70,6 @@ func initDB() error {
 	return err
 }
 
-// Генератор карт
 type MapGenerator struct {
 	config   Config
 	spawns   []Circle
@@ -103,17 +100,14 @@ func (g *MapGenerator) getAllCircles() []Circle {
 	return all
 }
 
-// Проверка пересечений кругов
 func (g *MapGenerator) canPlaceCircle(newCircle Circle) bool {
-	// Проверка границ карты
 	if newCircle.X-newCircle.Radius < 0 || newCircle.X+newCircle.Radius >= g.config.Width ||
 		newCircle.Y-newCircle.Radius < 0 || newCircle.Y+newCircle.Radius >= g.config.Height {
 		return false
 	}
 
-	// Проверка пересечений с существующими кругами
 	for _, existing := range g.getAllCircles() {
-		distance := math.Sqrt(float64((newCircle.X-existing.X)*(newCircle.X-existing.X) + 
+		distance := math.Sqrt(float64((newCircle.X-existing.X)*(newCircle.X-existing.X) +
 			(newCircle.Y-existing.Y)*(newCircle.Y-existing.Y)))
 
 		if distance < float64(newCircle.Radius+existing.Radius) {
@@ -124,7 +118,6 @@ func (g *MapGenerator) canPlaceCircle(newCircle Circle) bool {
 	return true
 }
 
-// Генерация позиции рядом с существующим кругом
 func (g *MapGenerator) generateNearbyPosition(baseCircle Circle, radius int) (int, int) {
 	for attempts := 0; attempts < 30; attempts++ {
 		angle := rand.Float64() * 2 * math.Pi
@@ -140,17 +133,14 @@ func (g *MapGenerator) generateNearbyPosition(baseCircle Circle, radius int) (in
 		}
 	}
 
-	// Fallback - случайная позиция
 	x := radius + rand.Intn(g.config.Width-2*radius)
 	y := radius + rand.Intn(g.config.Height-2*radius)
 	return x, y
 }
 
-// Основная функция генерации карты
 func (g *MapGenerator) Generate() error {
 	rand.Seed(time.Now().UnixNano())
 
-	// Размещаем первый spawn в центре
 	if g.config.Spawns > 0 {
 		centerSpawn := Circle{
 			X:      g.config.Width / 2,
@@ -163,7 +153,6 @@ func (g *MapGenerator) Generate() error {
 		}
 	}
 
-	// Размещаем остальные spawn круги
 	for i := len(g.spawns); i < g.config.Spawns; i++ {
 		placed := false
 
@@ -192,7 +181,6 @@ func (g *MapGenerator) Generate() error {
 		}
 	}
 
-	// Размещаем bedroom круги
 	for i := 0; i < g.config.Bedrooms; i++ {
 		placed := false
 
@@ -224,33 +212,28 @@ func (g *MapGenerator) Generate() error {
 	return nil
 }
 
-// Определение типа клетки
 func getCellType(x, y int, circles []Circle) int {
 	for _, circle := range circles {
 		dx := x - circle.X
 		dy := y - circle.Y
 
-		// Центр круга - зеленый
 		if dx == 0 && dy == 0 {
 			return 2
 		}
 
-		// Внутри круга - синий
 		if dx*dx+dy*dy <= circle.Radius*circle.Radius {
 			return 1
 		}
 	}
 
-	// Пустая клетка - белая
 	return 0
 }
 
-// Создание селектора для вероятностей
 func createProbabilitySelector(probabilities []float64) []int {
 	selector := make([]int, 0)
 
 	for index, probability := range probabilities {
-		count := int(probability * 50) // достаточная точность
+		count := int(probability * 50)
 		for j := 0; j < count; j++ {
 			selector = append(selector, index)
 		}
@@ -259,7 +242,6 @@ func createProbabilitySelector(probabilities []float64) []int {
 	return selector
 }
 
-// Простые цифровые паттерны 5x7
 var digitPatterns = map[rune][][]bool{
 	'0': {
 		{true, true, true, true, true},
@@ -357,12 +339,11 @@ var digitPatterns = map[rune][][]bool{
 		{false, false, false, false, false},
 		{false, false, false, false, false},
 		{false, false, false, false, false},
-		{false, false, true, false, false},
-		{false, true, false, false, false},
+		{false, false, true, true, false},
+		{false, true, true, false, false},
 	},
 }
 
-// Отрисовка одной цифры
 func drawDigit(img *image.RGBA, x, y int, digit rune, scale int) {
 	pattern, exists := digitPatterns[digit]
 	if !exists {
@@ -384,28 +365,27 @@ func drawDigit(img *image.RGBA, x, y int, digit rune, scale int) {
 	}
 }
 
-// НОВАЯ функция для отрисовки любых чисел (включая двузначные)
 func drawNumber(img *image.RGBA, x, y int, number int, scale int) {
 	if number < 0 {
 		return
 	}
 
 	numStr := strconv.Itoa(number)
-	digitWidth := 5 * scale + scale // ширина одной цифры + отступ между цифрами
-	totalWidth := len(numStr) * digitWidth - scale
+	digitWidth := 5 * scale
+	spacing := scale
+	totalWidth := len(numStr)*digitWidth + (len(numStr)-1)*spacing
 
-	startX := x - totalWidth/2 // центрируем число
+	startX := x - totalWidth/2
 
 	for i, digit := range numStr {
-		drawDigit(img, startX + i*digitWidth, y, digit, scale)
+		digitX := startX + i*(digitWidth+spacing)
+		drawDigit(img, digitX, y, digit, scale)
 	}
 }
 
-// Рендеринг карты с цифрами
 func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64) *image.RGBA {
 	cellSize := 100
 
-	// Ограничиваем размер карты для экономии памяти
 	if cfg.Width > 500 {
 		cfg.Width = 500
 	}
@@ -417,18 +397,16 @@ func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64)
 	height := cfg.Height * cellSize
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 
-	// Определяем цвета  
 	white := color.RGBA{255, 255, 255, 255}
-	gray := color.RGBA{128, 128, 128, 255}
+	gray := color.RGBA{220, 220, 220, 255}
 	blue := color.RGBA{100, 150, 255, 255}
 	green := color.RGBA{100, 255, 100, 255}
 
 	selector := createProbabilitySelector(probabilities)
 	if len(selector) == 0 {
-		selector = []int{0} // fallback
+		selector = []int{0}
 	}
 
-	// Рендерим каждую клетку
 	for mapY := 0; mapY < cfg.Height; mapY++ {
 		for mapX := 0; mapX < cfg.Width; mapX++ {
 			cellType := getCellType(mapX, mapY, circles)
@@ -440,59 +418,63 @@ func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64)
 			var indices []int
 
 			switch cellType {
-			case 2: // зеленая клетка (центр круга)
+			case 2:
 				backgroundColor = green
 				indices = []int{0}
-			case 1: // синяя клетка (внутри круга)
+			case 1:
 				backgroundColor = blue
 				indices = []int{selector[rand.Intn(len(selector))]}
-			case 0: // белая клетка (пустая) - 1 или 2 числа
+			case 0:
 				backgroundColor = white
-				count := 1 + rand.Intn(2) // 1 или 2 числа
+				count := 1 + rand.Intn(2)
 				indices = make([]int, count)
 				for i := 0; i < count; i++ {
 					indices[i] = selector[rand.Intn(len(selector))]
 				}
 			}
 
-			// Заливаем клетку цветом
+			// Заливаем клетку
 			for py := 0; py < cellSize; py++ {
 				for px := 0; px < cellSize; px++ {
 					img.Set(startX+px, startY+py, backgroundColor)
 				}
 			}
 
-			// Рисуем рамку клетки
-			for py := 0; py < cellSize; py++ {
-				img.Set(startX+cellSize-1, startY+py, gray) // правая
-				img.Set(startX, startY+py, gray)           // левая
+			// Сетка
+			if startX+cellSize < width {
+				for py := 0; py < cellSize; py++ {
+					img.Set(startX+cellSize-1, startY+py, gray)
+				}
 			}
-			for px := 0; px < cellSize; px++ {
-				img.Set(startX+px, startY+cellSize-1, gray) // нижняя
-				img.Set(startX+px, startY, gray)           // верхняя
+			if startY+cellSize < height {
+				for px := 0; px < cellSize; px++ {
+					img.Set(startX+px, startY+cellSize-1, gray)
+				}
 			}
 
-			// ИСПРАВЛЕННАЯ отрисовка чисел (включая двузначные)
 			if len(indices) == 1 {
-				// Одно число по центру
-				digitX := startX + cellSize/2
-				digitY := startY + (cellSize-7*8)/2
-				drawNumber(img, digitX, digitY, indices[0], 8)
+				// Одно число
+				centerX := startX + cellSize/2
+				centerY := startY + cellSize/2 - 3*7
+				drawNumber(img, centerX, centerY, indices[0], 7)
+
 			} else if len(indices) == 2 {
-				// Два числа через запятую
-				digitY := startY + (cellSize-7*6)/2
+				// Два числа горизонтально
+				centerX := startX + cellSize/2
+				centerY := startY + cellSize/2 - 3*5
 
-				// Первое число
-				leftX := startX + cellSize/3
-				drawNumber(img, leftX, digitY, indices[0], 6) // меньший масштаб
+				text := fmt.Sprintf("%d,%d", indices[0], indices[1])
 
-				// Запятая
-				commaX := startX + cellSize/2
-				drawDigit(img, commaX, digitY, ',', 6)
+				symbolWidth := 5 * 5 // все символы одинакового размера
+				spacing := 5
+				totalWidth := len(text)*symbolWidth + (len(text)-1)*spacing
 
-				// Второе число  
-				rightX := startX + 2*cellSize/3
-				drawNumber(img, rightX, digitY, indices[1], 6)
+				currentX := centerX - totalWidth/2
+
+				for _, char := range text {
+					drawDigit(img, currentX, centerY, char, 5)
+					currentX += symbolWidth + spacing
+				}
 			}
 		}
 	}
@@ -500,7 +482,6 @@ func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64)
 	return img
 }
 
-// HTTP обработчики
 func mapHandler(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
 
@@ -523,8 +504,7 @@ func mapHandler(w http.ResponseWriter, r *http.Request) {
 
 	circles := generator.getAllCircles()
 
-	// Парсим вероятности
-	probabilities := []float64{90.0, 10.0} // по умолчанию
+	probabilities := []float64{90.0, 10.0}
 	if probsParam := params.Get("probs"); probsParam != "" {
 		probabilities = parseProbabilities(probsParam)
 	}
@@ -569,7 +549,6 @@ func createMapHandler(w http.ResponseWriter, r *http.Request) {
 
 	circles := generator.getAllCircles()
 
-	// Сохраняем в базу данных
 	configJSON, _ := json.Marshal(request.Config)
 	circlesJSON, _ := json.Marshal(circles)
 
@@ -612,7 +591,6 @@ func distributeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Получаем карту из БД
 	var configJSON, circlesJSON string
 	err = db.QueryRow("SELECT config, circles FROM maps WHERE id = ?", request.MapID).
 		Scan(&configJSON, &circlesJSON)
@@ -630,7 +608,6 @@ func distributeHandler(w http.ResponseWriter, r *http.Request) {
 	json.Unmarshal([]byte(configJSON), &config)
 	json.Unmarshal([]byte(circlesJSON), &circles)
 
-	// Генерируем распределение
 	cells := generateDistribution(config, circles, request.Probabilities)
 
 	response := struct {
@@ -642,7 +619,6 @@ func distributeHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// Вспомогательные функции
 func parseIntParam(param string) int {
 	value, _ := strconv.Atoi(param)
 	return value
@@ -676,11 +652,11 @@ func generateDistribution(cfg Config, circles []Circle, probabilities []float64)
 			var values []int
 
 			switch cellType {
-			case 2: // зеленая клетка
+			case 2:
 				values = []int{0}
-			case 1: // синяя клетка
+			case 1:
 				values = []int{selector[rand.Intn(len(selector))]}
-			case 0: // белая клетка - 1 или 2 числа
+			case 0:
 				count := 1 + rand.Intn(2)
 				values = make([]int, count)
 				for i := 0; i < count; i++ {
