@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -114,7 +113,7 @@ func (g *MapGenerator) canPlaceCircle(newCircle Circle) bool {
 
 	// Проверка пересечений с существующими кругами
 	for _, existing := range g.getAllCircles() {
-		distance := math.Sqrt(float64((newCircle.X-existing.X)*(newCircle.X-existing.X) +
+		distance := math.Sqrt(float64((newCircle.X-existing.X)*(newCircle.X-existing.X) + 
 			(newCircle.Y-existing.Y)*(newCircle.Y-existing.Y)))
 
 		if distance < float64(newCircle.Radius+existing.Radius) {
@@ -363,7 +362,7 @@ var digitPatterns = map[rune][][]bool{
 	},
 }
 
-// Отрисовка цифры
+// Отрисовка одной цифры
 func drawDigit(img *image.RGBA, x, y int, digit rune, scale int) {
 	pattern, exists := digitPatterns[digit]
 	if !exists {
@@ -385,6 +384,23 @@ func drawDigit(img *image.RGBA, x, y int, digit rune, scale int) {
 	}
 }
 
+// НОВАЯ функция для отрисовки любых чисел (включая двузначные)
+func drawNumber(img *image.RGBA, x, y int, number int, scale int) {
+	if number < 0 {
+		return
+	}
+
+	numStr := strconv.Itoa(number)
+	digitWidth := 5 * scale + scale // ширина одной цифры + отступ между цифрами
+	totalWidth := len(numStr) * digitWidth - scale
+
+	startX := x - totalWidth/2 // центрируем число
+
+	for i, digit := range numStr {
+		drawDigit(img, startX + i*digitWidth, y, digit, scale)
+	}
+}
+
 // Рендеринг карты с цифрами
 func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64) *image.RGBA {
 	cellSize := 100
@@ -401,7 +417,7 @@ func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64)
 	height := cfg.Height * cellSize
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 
-	// Определяем цвета
+	// Определяем цвета  
 	white := color.RGBA{255, 255, 255, 255}
 	gray := color.RGBA{128, 128, 128, 255}
 	blue := color.RGBA{100, 150, 255, 255}
@@ -449,36 +465,34 @@ func renderMapWithNumbers(cfg Config, circles []Circle, probabilities []float64)
 			// Рисуем рамку клетки
 			for py := 0; py < cellSize; py++ {
 				img.Set(startX+cellSize-1, startY+py, gray) // правая
-				img.Set(startX, startY+py, gray)            // левая
+				img.Set(startX, startY+py, gray)           // левая
 			}
 			for px := 0; px < cellSize; px++ {
 				img.Set(startX+px, startY+cellSize-1, gray) // нижняя
-				img.Set(startX+px, startY, gray)            // верхняя
+				img.Set(startX+px, startY, gray)           // верхняя
 			}
 
-			// Рисуем цифры в центре клетки
-			if len(indices) == 1 && indices[0] >= 0 && indices[0] <= 9 {
-				// Одна цифра по центру
-				digitX := startX + (cellSize-5*8)/2
+			// ИСПРАВЛЕННАЯ отрисовка чисел (включая двузначные)
+			if len(indices) == 1 {
+				// Одно число по центру
+				digitX := startX + cellSize/2
 				digitY := startY + (cellSize-7*8)/2
-				drawDigit(img, digitX, digitY, rune('0'+indices[0]), 8)
+				drawNumber(img, digitX, digitY, indices[0], 8)
 			} else if len(indices) == 2 {
-				// Две цифры рядом
-				if indices[0] >= 0 && indices[0] <= 9 {
-					digitX := startX + (cellSize-11*8)/2 // левая цифра
-					digitY := startY + (cellSize-7*8)/2
-					drawDigit(img, digitX, digitY, rune('0'+indices[0]), 8)
-				}
-				// Запятая
-				commaX := startX + (cellSize-1*8)/2
-				commaY := startY + (cellSize-7*8)/2
-				drawDigit(img, commaX, commaY, ',', 8)
+				// Два числа через запятую
+				digitY := startY + (cellSize-7*6)/2
 
-				if indices[1] >= 0 && indices[1] <= 9 {
-					digitX := startX + (cellSize-11*8)/2 + 7*8 // правая цифра
-					digitY := startY + (cellSize-7*8)/2
-					drawDigit(img, digitX, digitY, rune('0'+indices[1]), 8)
-				}
+				// Первое число
+				leftX := startX + cellSize/3
+				drawNumber(img, leftX, digitY, indices[0], 6) // меньший масштаб
+
+				// Запятая
+				commaX := startX + cellSize/2
+				drawDigit(img, commaX, digitY, ',', 6)
+
+				// Второе число  
+				rightX := startX + 2*cellSize/3
+				drawNumber(img, rightX, digitY, indices[1], 6)
 			}
 		}
 	}
