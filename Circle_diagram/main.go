@@ -4,16 +4,12 @@ import (
     "database/sql"
     "encoding/json"
     "fmt"
-    "image"
-    "image/color"
-    "image/png"
     "log"
     "math"
     "math/rand"
     "net/http"
-    "strconv"
-    "strings"
     "time"
+    "strconv"
     _ "github.com/mattn/go-sqlite3"
 )
 
@@ -50,11 +46,11 @@ type Cell struct {
     Vals []int `json:"indices"`
 }
 
-// Запросы новых эндпоинтов
 type SetSpeedsRequest struct {
     MapID  int       `json:"map_id"`
     Speeds []float64 `json:"speeds"`
 }
+
 type NewEpochRequest struct {
     MapID int `json:"map_id"`
 }
@@ -80,6 +76,7 @@ func initDB() error {
     return err
 }
 
+// --- генерация и распределение ---
 type MapGenerator struct {
     config   Config
     spawns   []Circle
@@ -108,13 +105,11 @@ func (g *MapGenerator) getAllCircles() []Circle {
 }
 
 func (g *MapGenerator) canPlaceCircle(newCircle Circle) bool {
-    if newCircle.X-newCircle.Radius < 0 || newCircle.X+newCircle.Radius >= g.config.Width ||
-        newCircle.Y-newCircle.Radius < 0 || newCircle.Y+newCircle.Radius >= g.config.Height {
+    if newCircle.X-newCircle.Radius < 0 || newCircle.X+newCircle.Radius >= g.config.Width || newCircle.Y-newCircle.Radius < 0 || newCircle.Y+newCircle.Radius >= g.config.Height {
         return false
     }
     for _, existing := range g.getAllCircles() {
-        distance := math.Sqrt(float64((newCircle.X-existing.X)*(newCircle.X-existing.X) +
-            (newCircle.Y-existing.Y)*(newCircle.Y-existing.Y)))
+        distance := math.Sqrt(float64((newCircle.X-existing.X)*(newCircle.X-existing.X) + (newCircle.Y-existing.Y)*(newCircle.Y-existing.Y)))
         if distance < float64(newCircle.Radius+existing.Radius) {
             return false
         }
@@ -142,11 +137,7 @@ func (g *MapGenerator) generateNearbyPosition(baseCircle Circle, radius int) (in
 func (g *MapGenerator) Generate() error {
     rand.Seed(time.Now().UnixNano())
     if g.config.Spawns > 0 {
-        centerSpawn := Circle{
-            X:      g.config.Width / 2,
-            Y:      g.config.Height / 2,
-            Radius: g.config.SpawnR,
-        }
+        centerSpawn := Circle{X: g.config.Width / 2, Y: g.config.Height / 2, Radius: g.config.SpawnR}
         if g.canPlaceCircle(centerSpawn) {
             g.spawns = append(g.spawns, centerSpawn)
         }
@@ -214,15 +205,11 @@ func getCellType(x, y int, circles []Circle) int {
     return 0
 }
 
-// --- Новый функционал третей части ---
-
-// Получение соседних клеток
+// --- Новое: соседние клетки и эпохи ---
 func getNeighbors(x, y int, cfg Config) []struct{ X, Y int } {
     neighbors := []struct{ X, Y int }{}
     directions := []struct{ dx, dy int }{
-        {-1, -1}, {-1, 0}, {-1, 1},
-        {0, -1}, {0, 1},
-        {1, -1}, {1, 0}, {1, 1},
+        {-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 0}, {1, 1},
     }
     for _, dir := range directions {
         nx, ny := x+dir.dx, y+dir.dy
@@ -288,18 +275,14 @@ func moveNumbers(cfg Config, circles []Circle, cells []Cell, speeds []float64) [
         for x := 0; x < cfg.Width; x++ {
             key := fmt.Sprintf("%d,%d", x, y)
             if vals, exists := currentState[key]; exists && len(vals) > 0 {
-                newCells = append(newCells, Cell{
-                    X:    x,
-                    Y:    y,
-                    Vals: vals,
-                })
+                newCells = append(newCells, Cell{X: x, Y: y, Vals: vals})
             }
         }
     }
     return newCells
 }
 
-// Эндпоинт POST /api/speeds
+// --- Эндпоинты ---
 func setSpeedsHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != "POST" {
         http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
@@ -332,7 +315,6 @@ func setSpeedsHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(response)
 }
 
-// Эндпоинт POST /api/newEpoch
 func newEpochHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != "POST" {
         http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
@@ -346,8 +328,7 @@ func newEpochHandler(w http.ResponseWriter, r *http.Request) {
     }
     var configJSON, circlesJSON, speedsJSON string
     var currentEpoch int
-    err = db.QueryRow("SELECT config, circles, speeds, epoch FROM maps WHERE id = ?", request.MapID).
-        Scan(&configJSON, &circlesJSON, &speedsJSON, &currentEpoch)
+    err = db.QueryRow("SELECT config, circles, speeds, epoch FROM maps WHERE id = ?", request.MapID).Scan(&configJSON, &circlesJSON, &speedsJSON, &currentEpoch)
     if err != nil {
         if err == sql.ErrNoRows {
             http.Error(w, "Карта не найдена", http.StatusNotFound)
@@ -383,8 +364,7 @@ func newEpochHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(response)
 }
 
-// --- Остальные функции (без изменений, для полноценной работы) ---
-
+// --- Вспомогательные функции ---
 func createProbabilitySelector(probabilities []float64) []int {
     selector := make([]int, 0)
     for index, probability := range probabilities {
@@ -399,9 +379,7 @@ func createProbabilitySelector(probabilities []float64) []int {
 func generateDistribution(cfg Config, circles []Circle, probabilities []float64) []Cell {
     cells := make([]Cell, 0)
     selector := createProbabilitySelector(probabilities)
-    if len(selector) == 0 {
-        return cells
-    }
+    if len(selector) == 0 { return cells }
     for y := 0; y < cfg.Height; y++ {
         for x := 0; x < cfg.Width; x++ {
             cellType := getCellType(x, y, circles)
@@ -419,18 +397,14 @@ func generateDistribution(cfg Config, circles []Circle, probabilities []float64)
                 }
             }
             if len(values) > 0 {
-                cells = append(cells, Cell{
-                    X:    x,
-                    Y:    y,
-                    Vals: values,
-                })
+                cells = append(cells, Cell{X: x, Y: y, Vals: values})
             }
         }
     }
     return cells
 }
 
-// --- Endpoints для существующей функциональности ---
+// --- Базовые эндпоинты создания и распределения ---
 func createMapHandler(w http.ResponseWriter, r *http.Request) {
     if r.Method != "POST" {
         http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
@@ -457,21 +431,13 @@ func createMapHandler(w http.ResponseWriter, r *http.Request) {
     circles := generator.getAllCircles()
     configJSON, _ := json.Marshal(request.Config)
     circlesJSON, _ := json.Marshal(circles)
-    result, err := db.Exec(
-        "INSERT INTO maps (name, config, circles) VALUES (?, ?, ?)",
-        request.Name, string(configJSON), string(circlesJSON))
+    result, err := db.Exec("INSERT INTO maps (name, config, circles) VALUES (?, ?, ?)", request.Name, string(configJSON), string(circlesJSON))
     if err != nil {
         http.Error(w, "Ошибка сохранения в БД", http.StatusInternalServerError)
         return
     }
     id, _ := result.LastInsertId()
-    response := Map{
-        ID:      int(id),
-        Name:    request.Name,
-        Config:  request.Config,
-        Circles: circles,
-        Created: time.Now(),
-    }
+    response := Map{ID: int(id), Name: request.Name, Config: request.Config, Circles: circles, Created: time.Now()}
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(response)
 }
@@ -491,8 +457,7 @@ func distributeHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     var configJSON, circlesJSON string
-    err = db.QueryRow("SELECT config, circles FROM maps WHERE id = ?", request.MapID).
-        Scan(&configJSON, &circlesJSON)
+    err = db.QueryRow("SELECT config, circles FROM maps WHERE id = ?", request.MapID).Scan(&configJSON, &circlesJSON)
     if err != nil {
         if err == sql.ErrNoRows {
             http.Error(w, "Карта не найдена", http.StatusNotFound)
@@ -514,6 +479,7 @@ func distributeHandler(w http.ResponseWriter, r *http.Request) {
     json.NewEncoder(w).Encode(response)
 }
 
+// --- Маршрутизация всех эндпоинтов ---
 func apiHandler(w http.ResponseWriter, r *http.Request) {
     switch {
     case r.URL.Path == "/api/maps" && r.Method == "POST":
@@ -529,6 +495,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
     }
 }
 
+// --- Запуск сервера ---
 func main() {
     err := initDB()
     if err != nil {
@@ -537,9 +504,8 @@ func main() {
     defer db.Close()
     http.HandleFunc("/api/", apiHandler)
     log.Println("Сервер запущен на порту :8080")
-    log.Println("Доступные endpoints:")
     log.Println(" POST /api/maps - создание карты")
-    log.Println(" POST /api/distribute - распределение индексов")
+    log.Println(" POST /api/distribute - распределение")
     log.Println(" POST /api/speeds - установка скоростей")
     log.Println(" POST /api/newEpoch - переключение эпохи")
     log.Fatal(http.ListenAndServe(":8080", nil))
