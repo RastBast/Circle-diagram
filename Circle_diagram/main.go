@@ -8,7 +8,6 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +58,60 @@ type NewEpochRequest struct {
 
 var db *sql.DB
 
+func forceMigration() error {
+	log.Println("🔧 Принудительная миграция базы данных...")
+
+	// Проверяем существование колонок и добавляем если нужно
+	migrations := []struct {
+		sql  string
+		desc string
+	}{
+		{"ALTER TABLE maps ADD COLUMN speeds TEXT DEFAULT '';", "speeds"},
+		{"ALTER TABLE maps ADD COLUMN epoch INTEGER DEFAULT 0;", "epoch"},
+	}
+
+	for i, migration := range migrations {
+		_, err := db.Exec(migration.sql)
+		if err != nil {
+			if strings.Contains(err.Error(), "duplicate column") {
+				log.Printf("   ✅ Миграция %d (%s): колонка уже существует", i+1, migration.desc)
+			} else {
+				log.Printf("   ⚠️  Миграция %d (%s): %v", i+1, migration.desc, err)
+			}
+		} else {
+			log.Printf("   ✅ Миграция %d (%s): колонка добавлена", i+1, migration.desc)
+		}
+	}
+
+	// Принудительно удаляем и пересоздаем таблицу map_cells
+	log.Println("🔧 Пересоздание таблицы map_cells...")
+	_, err := db.Exec("DROP TABLE IF EXISTS map_cells;")
+	if err != nil {
+		log.Printf("   ⚠️  Не удалось удалить старую таблицу: %v", err)
+	}
+
+	// Создаем таблицу клеток с правильным синтаксисом
+	cellsTable := `CREATE TABLE map_cells (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		map_id INTEGER NOT NULL,
+		x INTEGER NOT NULL,
+		y INTEGER NOT NULL,
+		cell_values TEXT NOT NULL,
+		FOREIGN KEY(map_id) REFERENCES maps(id)
+	);`
+
+	_, err = db.Exec(cellsTable)
+	if err != nil {
+		log.Printf("   ❌ Ошибка создания таблицы map_cells: %v", err)
+		return err
+	} else {
+		log.Printf("   ✅ Таблица map_cells создана успешно")
+	}
+
+	log.Println("🎉 Миграция завершена!")
+	return nil
+}
+
 func initDB() error {
 	var err error
 	db, err = sql.Open("sqlite3", "./maps.db")
@@ -81,64 +134,10 @@ func initDB() error {
 		return err
 	}
 
-	// Выполняем миграцию
-	err = migrateDB()
+	// Принудительная миграция
+	err = forceMigration()
 	if err != nil {
 		return err
-	}
-
-	// Создаем таблицу для состояний клеток
-	createCellsTableSQL := `
-	CREATE TABLE IF NOT EXISTS map_cells (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		map_id INTEGER NOT NULL,
-		x INTEGER NOT NULL,
-		y INTEGER NOT NULL,
-		values TEXT NOT NULL,
-		FOREIGN KEY(map_id) REFERENCES maps(id)
-	);`
-
-	_, err = db.Exec(createCellsTableSQL)
-	return err
-}
-
-func migrateDB() error {
-	// Проверяем существование колонки speeds
-	var speedsCount int
-	err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('maps') WHERE name='speeds'`).Scan(&speedsCount)
-	if err != nil {
-		// Если pragma не работает, пробуем альтернативный способ
-		_, err = db.Exec("SELECT speeds FROM maps LIMIT 1")
-		if err != nil && strings.Contains(err.Error(), "no such column") {
-			_, err = db.Exec("ALTER TABLE maps ADD COLUMN speeds TEXT DEFAULT ''")
-			if err != nil {
-				return fmt.Errorf("ошибка добавления колонки speeds: %v", err)
-			}
-		}
-	} else if speedsCount == 0 {
-		_, err = db.Exec("ALTER TABLE maps ADD COLUMN speeds TEXT DEFAULT ''")
-		if err != nil {
-			return fmt.Errorf("ошибка добавления колонки speeds: %v", err)
-		}
-	}
-
-	// Проверяем существование колонки epoch
-	var epochCount int
-	err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('maps') WHERE name='epoch'`).Scan(&epochCount)
-	if err != nil {
-		// Если pragma не работает, пробуем альтернативный способ
-		_, err = db.Exec("SELECT epoch FROM maps LIMIT 1")
-		if err != nil && strings.Contains(err.Error(), "no such column") {
-			_, err = db.Exec("ALTER TABLE maps ADD COLUMN epoch INTEGER DEFAULT 0")
-			if err != nil {
-				return fmt.Errorf("ошибка добавления колонки epoch: %v", err)
-			}
-		}
-	} else if epochCount == 0 {
-		_, err = db.Exec("ALTER TABLE maps ADD COLUMN epoch INTEGER DEFAULT 0")
-		if err != nil {
-			return fmt.Errorf("ошибка добавления колонки epoch: %v", err)
-		}
 	}
 
 	return nil
@@ -328,9 +327,14 @@ func generateDistribution(cfg Config, circles []Circle, probabilities []float64)
 
 func getNeighbors(x, y int, cfg Config) []struct{ X, Y int } {
 	directions := []struct{ dx, dy int }{
-		{-1, -1}, {-1, 0}, {-1, 1},
-		{0, -1}, {0, 1},
-		{1, -1}, {1, 0}, {1, 1},
+		{-1, -1},
+		{-1, 0},
+		{-1, 1},
+		{0, -1},
+		{0, 1},
+		{1, -1},
+		{1, 0},
+		{1, 1},
 	}
 	neighbors := []struct{ X, Y int }{}
 	for _, d := range directions {
@@ -344,6 +348,7 @@ func getNeighbors(x, y int, cfg Config) []struct{ X, Y int } {
 
 func moveNumbers(cfg Config, circles []Circle, cells []Cell, speeds []float64) []Cell {
 	if len(speeds) == 0 {
+		log.Println("⚠️  Скорости не установлены, числа не двигаются")
 		return cells
 	}
 
@@ -396,7 +401,7 @@ func moveNumbers(cfg Config, circles []Circle, cells []Cell, speeds []float64) [
 					switch neighborType {
 					case 0: // белая - максимум 2
 						canMove = currentCount < 2
-					case 1: // синяя - максимум 1  
+					case 1: // синяя - максимум 1
 						canMove = currentCount < 1
 					case 2: // зеленая - недоступна
 						canMove = false
@@ -435,24 +440,24 @@ func moveNumbers(cfg Config, circles []Circle, cells []Cell, speeds []float64) [
 	return result
 }
 
-// Функции для работы с клетками в БД
+// ИСПРАВЛЕННЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С БД
 func saveCellsToDB(mapID int, cells []Cell) error {
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return fmt.Errorf("начало транзакции: %v", err)
 	}
 	defer tx.Rollback()
 
 	// Удаляем старые данные
 	_, err = tx.Exec("DELETE FROM map_cells WHERE map_id = ?", mapID)
 	if err != nil {
-		return err
+		return fmt.Errorf("удаление старых клеток: %v", err)
 	}
 
-	// Сохраняем новые данные
-	stmt, err := tx.Prepare("INSERT INTO map_cells (map_id, x, y, values) VALUES (?, ?, ?, ?)")
+	// ИСПРАВЛЕНО: используем cell_values вместо values
+	stmt, err := tx.Prepare("INSERT INTO map_cells (map_id, x, y, cell_values) VALUES (?, ?, ?, ?)")
 	if err != nil {
-		return err
+		return fmt.Errorf("подготовка запроса: %v", err)
 	}
 	defer stmt.Close()
 
@@ -461,18 +466,24 @@ func saveCellsToDB(mapID int, cells []Cell) error {
 			valsJSON, _ := json.Marshal(cell.Vals)
 			_, err = stmt.Exec(mapID, cell.X, cell.Y, string(valsJSON))
 			if err != nil {
-				return err
+				return fmt.Errorf("вставка клетки (%d,%d): %v", cell.X, cell.Y, err)
 			}
 		}
 	}
 
-	return tx.Commit()
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("коммит транзакции: %v", err)
+	}
+
+	return nil
 }
 
 func loadCellsFromDB(mapID int) ([]Cell, error) {
-	rows, err := db.Query("SELECT x, y, values FROM map_cells WHERE map_id = ?", mapID)
+	// ИСПРАВЛЕНО: используем cell_values и добавлено WHERE условие
+	rows, err := db.Query("SELECT x, y, cell_values FROM map_cells WHERE map_id = ?", mapID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("запрос клеток: %v", err)
 	}
 	defer rows.Close()
 
@@ -482,13 +493,13 @@ func loadCellsFromDB(mapID int) ([]Cell, error) {
 		var valsJSON string
 		err = rows.Scan(&x, &y, &valsJSON)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("чтение строки: %v", err)
 		}
 
 		var vals []int
 		err = json.Unmarshal([]byte(valsJSON), &vals)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("парсинг values: %v", err)
 		}
 
 		cells = append(cells, Cell{X: x, Y: y, Vals: vals})
@@ -560,7 +571,7 @@ func createMapHandler(w http.ResponseWriter, r *http.Request) {
 	configBytes, _ := json.Marshal(req.Config)
 	circlesBytes, _ := json.Marshal(circles)
 
-	res, err := db.Exec("INSERT INTO maps (name, config, circles) VALUES (?, ?, ?)", 
+	res, err := db.Exec("INSERT INTO maps (name, config, circles) VALUES (?, ?, ?)",
 		req.Name, string(configBytes), string(circlesBytes))
 	if err != nil {
 		http.Error(w, "Ошибка сохранения в БД: "+err.Error(), http.StatusInternalServerError)
@@ -664,9 +675,12 @@ func setSpeedsHandler(w http.ResponseWriter, r *http.Request) {
 	speedBytes, _ := json.Marshal(req.Speeds)
 	_, err = db.Exec("UPDATE maps SET speeds = ? WHERE id = ?", string(speedBytes), req.MapID)
 	if err != nil {
+		log.Printf("❌ Ошибка SQL при сохранении скоростей: %v", err)
 		http.Error(w, "Ошибка сохранения скоростей: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	log.Printf("✅ Скорости сохранены для карты %d", req.MapID)
 
 	resp := struct {
 		MapID   int       `json:"map_id"`
@@ -690,15 +704,17 @@ func newEpochHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var cfgStr, circlesStr, speedsStr string
-	var epoch int
-	err := db.QueryRow("SELECT config, circles, COALESCE(speeds, ''), COALESCE(epoch, 0) FROM maps WHERE id = ?", 
+	// Получаем данные карты с обработкой NULL значений
+	var cfgStr, circlesStr, speedsStr sql.NullString
+	var epoch sql.NullInt64
+	err := db.QueryRow("SELECT config, circles, speeds, epoch FROM maps WHERE id = ?",
 		req.MapID).Scan(&cfgStr, &circlesStr, &speedsStr, &epoch)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			http.Error(w, "Карта не найдена", http.StatusNotFound)
 		} else {
-			http.Error(w, "Ошибка БД: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("❌ Ошибка SQL: %v", err)
+			http.Error(w, "Ошибка БД при получении карты: "+err.Error(), http.StatusInternalServerError)
 		}
 		return
 	}
@@ -707,16 +723,16 @@ func newEpochHandler(w http.ResponseWriter, r *http.Request) {
 	var circles []Circle
 	var speeds []float64
 
-	if err := json.Unmarshal([]byte(cfgStr), &cfg); err != nil {
+	if err := json.Unmarshal([]byte(cfgStr.String), &cfg); err != nil {
 		http.Error(w, "Ошибка парсинга config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := json.Unmarshal([]byte(circlesStr), &circles); err != nil {
+	if err := json.Unmarshal([]byte(circlesStr.String), &circles); err != nil {
 		http.Error(w, "Ошибка парсинга circles: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if speedsStr != "" && speedsStr != "[]" {
-		if err := json.Unmarshal([]byte(speedsStr), &speeds); err != nil {
+	if speedsStr.Valid && speedsStr.String != "" && speedsStr.String != "[]" {
+		if err := json.Unmarshal([]byte(speedsStr.String), &speeds); err != nil {
 			http.Error(w, "Ошибка парсинга speeds: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -725,6 +741,7 @@ func newEpochHandler(w http.ResponseWriter, r *http.Request) {
 	// Получаем текущие клетки из БД
 	cells, err := loadCellsFromDB(req.MapID)
 	if err != nil {
+		log.Printf("⚠️  Ошибка загрузки клеток: %v", err)
 		http.Error(w, "Ошибка загрузки клеток: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -732,23 +749,30 @@ func newEpochHandler(w http.ResponseWriter, r *http.Request) {
 	// Если клеток нет, генерируем начальное распределение
 	if len(cells) == 0 {
 		cells = generateDistribution(cfg, circles, []float64{90.0, 10.0})
+		log.Printf("📋 Сгенерировано начальное распределение для карты %d", req.MapID)
 	}
 
 	// Применяем движение, если есть скорости
 	if len(speeds) > 0 {
 		cells = moveNumbers(cfg, circles, cells, speeds)
+		log.Printf("🎯 Применено движение чисел для карты %d", req.MapID)
+	} else {
+		log.Printf("⚠️  Скорости не установлены для карты %d, числа не двигаются", req.MapID)
 	}
 
 	// Увеличиваем эпоху
-	epoch++
-	_, err = db.Exec("UPDATE maps SET epoch = ? WHERE id = ?", epoch, req.MapID)
+	currentEpoch := int(epoch.Int64)
+	currentEpoch++
+	_, err = db.Exec("UPDATE maps SET epoch = ? WHERE id = ?", currentEpoch, req.MapID)
 	if err != nil {
+		log.Printf("❌ Ошибка обновления эпохи: %v", err)
 		http.Error(w, "Ошибка обновления эпохи: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Сохраняем новое состояние клеток
 	if err := saveCellsToDB(req.MapID, cells); err != nil {
+		log.Printf("❌ Ошибка сохранения клеток: %v", err)
 		http.Error(w, "Ошибка сохранения клеток: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -757,7 +781,7 @@ func newEpochHandler(w http.ResponseWriter, r *http.Request) {
 		MapID int    `json:"map_id"`
 		Epoch int    `json:"epoch"`
 		Cells []Cell `json:"cells"`
-	}{req.MapID, epoch, cells}
+	}{req.MapID, currentEpoch, cells}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -774,7 +798,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Логируем запросы
-	log.Printf("%s %s", r.Method, r.URL.Path)
+	log.Printf("📡 %s %s", r.Method, r.URL.Path)
 
 	switch {
 	case r.URL.Path == "/api/maps" && r.Method == http.MethodPost:
@@ -791,20 +815,22 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	log.Println("Инициализация базы данных...")
+	log.Println("🚀 Запуск Circle-diagram сервера...")
+	log.Println("📊 Инициализация базы данных...")
 	if err := initDB(); err != nil {
-		log.Fatalf("Ошибка инициализации БД: %v", err)
+		log.Fatalf("❌ Ошибка инициализации БД: %v", err)
 	}
 	defer db.Close()
 
 	http.HandleFunc("/api/", apiHandler)
 
-	log.Println("Сервер запущен на порту :8080")
-	log.Println("Доступные endpoints:")
-	log.Println(" POST /api/maps - создание карты")
-	log.Println(" POST /api/distribute - распределение чисел")
-	log.Println(" POST /api/speeds - установка скоростей")
-	log.Println(" POST /api/newEpoch - переключение эпохи")
+	log.Println("✅ Сервер запущен на порту :8080")
+	log.Println("📋 Доступные endpoints:")
+	log.Println("   POST /api/maps - создание карты")
+	log.Println("   POST /api/distribute - распределение чисел")
+	log.Println("   POST /api/speeds - установка скоростей")
+	log.Println("   POST /api/newEpoch - переключение эпохи")
+	log.Println("🎮 Готов к работе!")
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
