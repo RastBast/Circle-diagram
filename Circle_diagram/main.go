@@ -4,6 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"log"
 	"math"
 	"math/rand"
@@ -11,6 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/golang/freetype"
+	"github.com/golang/freetype/truetype"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -48,7 +57,7 @@ type Cell struct {
 	Vals []int `json:"indices"`
 }
 
-// СТРУКТУРЫ ДЛЯ ИГРОКА
+// НОВЫЕ СТРУКТУРЫ ДЛЯ ИГРОКА
 type Player struct {
 	ID       int       `json:"id"`
 	MapID    int       `json:"map_id"`
@@ -128,7 +137,7 @@ func forceMigration() error {
 		log.Printf("   ✅ Таблица map_cells создана успешно")
 	}
 
-	// ТАБЛИЦА ДЛЯ ИГРОКОВ
+	// НОВАЯ ТАБЛИЦА ДЛЯ ИГРОКОВ
 	log.Println("🔧 Создание таблицы игроков...")
 	playersTable := `CREATE TABLE IF NOT EXISTS players (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -542,7 +551,7 @@ func loadCellsFromDB(mapID int) ([]Cell, error) {
 	return cells, nil
 }
 
-// ФУНКЦИИ ДЛЯ ИГРОКОВ
+// НОВЫЕ ФУНКЦИИ ДЛЯ ИГРОКОВ
 func getSpawnPoints(circles []Circle) []Circle {
 	spawns := []Circle{}
 	for _, circle := range circles {
@@ -848,7 +857,7 @@ func newEpochHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// HANDLERS ДЛЯ ИГРОКОВ
+// НОВЫЕ HANDLERS ДЛЯ ИГРОКОВ
 
 func spawnPlayerHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -1013,7 +1022,6 @@ func movePlayerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// JSON-версия обзора игрока (БЕЗ внешних зависимостей)
 func playerViewHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Метод не поддерживается", http.StatusMethodNotAllowed)
@@ -1081,84 +1089,125 @@ func playerViewHandler(w http.ResponseWriter, r *http.Request) {
 		cellMap[key] = cell.Vals
 	}
 
-	// Создаем JSON обзор 5x5
-	viewData := make([][]map[string]interface{}, 5)
-	for i := range viewData {
-		viewData[i] = make([]map[string]interface{}, 5)
-	}
+	// Генерируем изображение обзора 5x5
+	img := image.NewRGBA(image.Rect(0, 0, 250, 250)) // 50px на клетку
 
 	for dy := -2; dy <= 2; dy++ {
 		for dx := -2; dx <= 2; dx++ {
 			mapX := playerX + dx
 			mapY := playerY + dy
 
-			viewX := dx + 2
-			viewY := dy + 2
+			imgX := (dx + 2) * 50
+			imgY := (dy + 2) * 50
 
-			cellData := map[string]interface{}{
-				"map_x": mapX,
-				"map_y": mapY,
-				"view_x": viewX,
-				"view_y": viewY,
-				"is_player": dx == 0 && dy == 0,
-			}
-
+			// Определяем цвет клетки
+			var cellColor color.RGBA
 			if mapX < 0 || mapX >= cfg.Width || mapY < 0 || mapY >= cfg.Height {
-				// Вне карты
-				cellData["type"] = "outside"
-				cellData["color"] = "black" 
-				cellData["description"] = "Вне карты"
-				cellData["numbers"] = []int{}
+				// Вне карты - черный
+				cellColor = color.RGBA{0, 0, 0, 255}
 			} else {
 				cellType := getCellType(mapX, mapY, circles)
 				switch cellType {
 				case 0: // белая
-					cellData["type"] = "empty"
-					cellData["color"] = "white"
-					cellData["description"] = "Пустая клетка"
+					cellColor = color.RGBA{255, 255, 255, 255}
 				case 1: // синяя
-					cellData["type"] = "inside_circle" 
-					cellData["color"] = "blue"
-					cellData["description"] = "Внутри круга"
-				case 2: // зеленая
-					cellData["type"] = "circle_center"
-					cellData["color"] = "green"
-					cellData["description"] = "Центр круга"
-				}
-
-				// Добавляем числа в клетке
-				key := fmt.Sprintf("%d,%d", mapX, mapY)
-				if numbers, exists := cellMap[key]; exists {
-					cellData["numbers"] = numbers
-				} else {
-					cellData["numbers"] = []int{}
+					cellColor = color.RGBA{100, 150, 255, 255}
+				case 2: // зеленая (центр круга)
+					cellColor = color.RGBA{100, 255, 100, 255}
 				}
 			}
 
-			viewData[viewY][viewX] = cellData
+			// Заливаем клетку цветом
+			for y := imgY; y < imgY+50; y++ {
+				for x := imgX; x < imgX+50; x++ {
+					img.Set(x, y, cellColor)
+				}
+			}
+
+			// Добавляем границы клетки
+			borderColor := color.RGBA{0, 0, 0, 255}
+			for x := imgX; x < imgX+50; x++ {
+				img.Set(x, imgY, borderColor)
+				img.Set(x, imgY+49, borderColor)
+			}
+			for y := imgY; y < imgY+50; y++ {
+				img.Set(imgX, y, borderColor)
+				img.Set(imgX+49, y, borderColor)
+			}
+
+			// Отмечаем позицию игрока
+			if dx == 0 && dy == 0 {
+				// Рисуем красный круг в центре клетки игрока
+				centerX := imgX + 25
+				centerY := imgY + 25
+				for y := centerY - 8; y <= centerY + 8; y++ {
+					for x := centerX - 8; x <= centerX + 8; x++ {
+						if (x-centerX)*(x-centerX)+(y-centerY)*(y-centerY) <= 64 {
+							img.Set(x, y, color.RGBA{255, 0, 0, 255})
+						}
+					}
+				}
+			}
+
+			// Показываем числа в клетке
+			if mapX >= 0 && mapX < cfg.Width && mapY >= 0 && mapY < cfg.Height {
+				key := fmt.Sprintf("%d,%d", mapX, mapY)
+				if numbers, exists := cellMap[key]; exists && len(numbers) > 0 {
+					// Простой способ показать числа (первые два)
+					textColor := color.RGBA{0, 0, 0, 255}
+					if len(numbers) >= 1 {
+						drawNumber(img, imgX+5, imgY+5, numbers[0], textColor)
+					}
+					if len(numbers) >= 2 {
+						drawNumber(img, imgX+5, imgY+25, numbers[1], textColor)
+					}
+				}
+			}
 		}
 	}
 
-	response := map[string]interface{}{
-		"player_id":   playerID,
-		"player_name": playerName,
-		"player_pos":  map[string]int{"x": playerX, "y": playerY},
-		"map_id":      mapID,
-		"view_size":   "5x5",
-		"view_grid":   viewData,
-		"legend": map[string]string{
-			"white": "Пустая клетка (можно разместить 1-2 числа)",
-			"blue":  "Внутри круга (можно разместить 1 число)", 
-			"green": "Центр круга (числа не размещаются)",
-			"black": "Вне карты (недоступно)",
-		},
-		"description": "Обзор игрока 5x5 с центром в его позиции. is_player=true отмечает клетку игрока",
+	// Отправляем изображение
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache")
+	png.Encode(w, img)
+
+	log.Printf("🎮 Создан обзор для игрока %d (%s) в позиции (%d, %d)", playerID, playerName, playerX, playerY)
+}
+
+// Простая функция для рисования цифр
+func drawNumber(img *image.RGBA, x, y, number int, col color.RGBA) {
+	// Простое представление цифр в виде точек
+	numStr := fmt.Sprintf("%d", number)
+	for i, ch := range numStr {
+		digit := int(ch - '0')
+		drawDigit(img, x+i*10, y, digit, col)
+	}
+}
+
+func drawDigit(img *image.RGBA, x, y, digit int, col color.RGBA) {
+	// Простые паттерны для цифр 0-9 (5x7 точек)
+	patterns := map[int][]string{
+		0: {"11111", "10001", "10001", "10001", "10001", "10001", "11111"},
+		1: {"00100", "01100", "00100", "00100", "00100", "00100", "01110"},
+		2: {"11111", "00001", "00001", "11111", "10000", "10000", "11111"},
+		3: {"11111", "00001", "00001", "11111", "00001", "00001", "11111"},
+		4: {"10001", "10001", "10001", "11111", "00001", "00001", "00001"},
+		5: {"11111", "10000", "10000", "11111", "00001", "00001", "11111"},
+		6: {"11111", "10000", "10000", "11111", "10001", "10001", "11111"},
+		7: {"11111", "00001", "00001", "00001", "00001", "00001", "00001"},
+		8: {"11111", "10001", "10001", "11111", "10001", "10001", "11111"},
+		9: {"11111", "10001", "10001", "11111", "00001", "00001", "11111"},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-
-	log.Printf("🎮 Создан JSON-обзор для игрока %d (%s) в позиции (%d, %d)", playerID, playerName, playerX, playerY)
+	if pattern, exists := patterns[digit]; exists {
+		for py, line := range pattern {
+			for px, char := range line {
+				if char == '1' {
+					img.Set(x+px, y+py, col)
+				}
+			}
+		}
+	}
 }
 
 func apiHandler(w http.ResponseWriter, r *http.Request) {
@@ -1184,7 +1233,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api/newEpoch" && r.Method == http.MethodPost:
 		newEpochHandler(w, r)
 
-	// ЭНДПОИНТЫ ДЛЯ ИГРОКОВ
+	// НОВЫЕ ЭНДПОИНТЫ ДЛЯ ИГРОКОВ
 	case r.URL.Path == "/api/player/spawn" && r.Method == http.MethodPost:
 		spawnPlayerHandler(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/player/") && strings.HasSuffix(r.URL.Path, "/move") && r.Method == http.MethodPost:
@@ -1198,7 +1247,7 @@ func apiHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	log.Println("🚀 Запуск Circle-diagram сервера с поддержкой игроков (JSON версия)...")
+	log.Println("🚀 Запуск Circle-diagram сервера с поддержкой игроков...")
 	log.Println("📊 Инициализация базы данных...")
 	if err := initDB(); err != nil {
 		log.Fatalf("❌ Ошибка инициализации БД: %v", err)
@@ -1213,10 +1262,10 @@ func main() {
 	log.Println("   POST /api/distribute - распределение чисел")
 	log.Println("   POST /api/speeds - установка скоростей")
 	log.Println("   POST /api/newEpoch - переключение эпохи")
-	log.Println("🎮 ENDPOINTS ДЛЯ ИГРОКОВ:")
+	log.Println("🎮 НОВЫЕ ENDPOINTS ДЛЯ ИГРОКОВ:")
 	log.Println("   POST /api/player/spawn - создание игрока")
 	log.Println("   POST /api/player/{id}/move - перемещение игрока")
-	log.Println("   GET  /api/player/{id}/view - обзор игрока (JSON)")
+	log.Println("   GET  /api/player/{id}/view - обзор игрока (картинка)")
 	log.Println("🎮 Готов к игре!")
 
 	log.Fatal(http.ListenAndServe(":8080", nil))
